@@ -1,0 +1,7 @@
+torch==2.5.1+cu124
+torchvision
+numpy>=1.22,<2.1
+facenet_pytorch
+torchaudio==2.5.1+cu124
+matplotlib
+pandas
