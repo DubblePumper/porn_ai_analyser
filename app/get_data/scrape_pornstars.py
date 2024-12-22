@@ -73,6 +73,10 @@ def optimize_image(image_path, quality=85):
 
 def download_image(url, file_path, max_retries=10, retry_delay=10):
     """Download a single image with retries."""
+    if not url.startswith('http'):
+        log_message(f"Invalid URL: {url}. Skipping download.")
+        return None
+
     for attempt in range(max_retries):
         try:
             scraper = cloudscraper.create_scraper()
@@ -89,7 +93,7 @@ def download_image(url, file_path, max_retries=10, retry_delay=10):
                 return None
             else:
                 log_message(f"Attempt {attempt + 1}: Failed to download image from {url}, status code: {response.status_code}, response text: {response.text}.")
-        except Exception as e:
+        except requests.RequestException as e:
             log_message(f"Attempt {attempt + 1}: Error downloading image: {e}")
         if attempt < max_retries - 1:
             log_message(f"Retrying in {retry_delay} seconds...")
