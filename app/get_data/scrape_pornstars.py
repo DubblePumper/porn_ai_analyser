@@ -91,6 +91,9 @@ def download_image(url, file_path, max_retries=10, retry_delay=10):
             elif response.status_code == 404:
                 log_message(f"Image not found (404): {url}. Skipping download.")
                 return None
+            elif response.status_code == 429:
+                log_message(f"Rate limit exceeded (429): {url}. Retrying after delay.")
+                time.sleep(retry_delay)
             else:
                 log_message(f"Attempt {attempt + 1}: Failed to download image from {url}, status code: {response.status_code}, response text: {response.text}.")
         except requests.RequestException as e:
@@ -130,7 +133,7 @@ def download_images(urls, first_name, last_name, max_retries=10, retry_delay=10)
 
 def get_theporndb_details(performer_name, max_retries=10, retry_delay=10):
     """Fetch performer details from ThePornDB with retries."""
-    encoded_name = urllib.parse.quote(performer_name)
+    encoded_name = urllib.parse.quote(performer_name.strip())
     search_url = f"https://api.theporndb.net/performers?q={encoded_name}"
     headers = {"accept": "application/json", "Authorization": f"Bearer {API_KEY}"}
 
@@ -193,7 +196,7 @@ def count_performer_images(performer):
     """Count the number of images a performer has."""
     return len(performer.get('image_urls', []))
 
-def scrape_performers(max_performers=150, start_page=1):
+def scrape_performers(max_performers=150, start_page=40):
     """Scrape performers from Pornhub."""
     performers = load_existing_performers(JSON_PATH)
     total_existing_performers = len(performers)
