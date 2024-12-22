@@ -193,7 +193,7 @@ def count_performer_images(performer):
     """Count the number of images a performer has."""
     return len(performer.get('image_urls', []))
 
-def scrape_performers(max_performers=150, start_page=2):
+def scrape_performers(max_performers=150, start_page=1):
     """Scrape performers from Pornhub."""
     performers = load_existing_performers(JSON_PATH)
     total_existing_performers = len(performers)
