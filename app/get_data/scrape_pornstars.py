@@ -71,7 +71,7 @@ def optimize_image(image_path, quality=85):
     except Exception as e:
         log_message(f"Error optimizing image {image_path}: {e}")
 
-def download_image(url, file_path, max_retries=3, retry_delay=5):
+def download_image(url, file_path, max_retries=10, retry_delay=10):
     """Download a single image with retries."""
     for attempt in range(max_retries):
         try:
@@ -84,8 +84,11 @@ def download_image(url, file_path, max_retries=3, retry_delay=5):
                 optimize_image(file_path)
                 log_message(f"Image downloaded: {file_path}")
                 return file_path
+            elif response.status_code == 404:
+                log_message(f"Image not found (404): {url}. Skipping download.")
+                return None
             else:
-                log_message(f"Attempt {attempt + 1}: Failed to download image, status code: {response.status_code}.")
+                log_message(f"Attempt {attempt + 1}: Failed to download image from {url}, status code: {response.status_code}, response text: {response.text}.")
         except Exception as e:
             log_message(f"Attempt {attempt + 1}: Error downloading image: {e}")
         if attempt < max_retries - 1:
@@ -95,12 +98,13 @@ def download_image(url, file_path, max_retries=3, retry_delay=5):
             log_message(f"Max retries reached for image. Skipping: {file_path}")
     return None
 
-def download_images(urls, first_name, last_name, max_retries=3, retry_delay=5):
+def download_images(urls, first_name, last_name, max_retries=10, retry_delay=10):
     """Download images for a performer with retries using multithreading."""
     performer_folder_name = get_performer_folder_name(first_name, last_name)
     folder_path = os.path.join(OUTPUT_DIR, performer_folder_name)
     os.makedirs(folder_path, exist_ok=True)
     downloaded_paths = []
+    image_count = len(urls)
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
@@ -108,7 +112,7 @@ def download_images(urls, first_name, last_name, max_retries=3, retry_delay=5):
             image_filename = f"{performer_folder_name}_{index + 1}.jpg"
             file_path = os.path.join(folder_path, image_filename)
             if os.path.exists(file_path):
-                log_message(f"Image {index + 1} for {first_name} {last_name} already exists, skipping...")
+                log_message(f"Image {index + 1} / {image_count} for {first_name} {last_name} already exists, skipping...")
                 downloaded_paths.append(file_path)
                 continue
             futures.append(executor.submit(download_image, url, file_path, max_retries, retry_delay))
@@ -120,7 +124,7 @@ def download_images(urls, first_name, last_name, max_retries=3, retry_delay=5):
 
     return downloaded_paths
 
-def get_theporndb_details(performer_name, max_retries=3, retry_delay=5):
+def get_theporndb_details(performer_name, max_retries=10, retry_delay=10):
     """Fetch performer details from ThePornDB with retries."""
     encoded_name = urllib.parse.quote(performer_name)
     search_url = f"https://api.theporndb.net/performers?q={encoded_name}"
@@ -181,6 +185,10 @@ def get_theporndb_details(performer_name, max_retries=3, retry_delay=5):
                 log_message(f"Max retries reached for {performer_name}. Skipping.")
                 return None
 
+def count_performer_images(performer):
+    """Count the number of images a performer has."""
+    return len(performer.get('image_urls', []))
+
 def scrape_performers(max_performers=150, start_page=2):
     """Scrape performers from Pornhub."""
     performers = load_existing_performers(JSON_PATH)
@@ -217,9 +225,12 @@ def scrape_performers(max_performers=150, start_page=2):
                     first_name = name_parts[0]
                     last_name = name_parts[1] if len(name_parts) > 1 else ''
                     performer_details['image_urls'] = download_images(performer_details.get('image_urls', []), first_name, last_name)
-                    performers.append(performer_details)
-                    save_performers(JSON_PATH, performers)
-                    processed_count += 1
+                    if performer_details['image_urls']:  # Check if performer has images
+                        performers.append(performer_details)
+                        save_performers(JSON_PATH, performers)
+                        image_count = count_performer_images(performer_details)
+                        log_message(f"Performer {performer_details['name']} has {image_count} images.")
+                        processed_count += 1
 
         total_remaining = max_performers - processed_count
         log_message(f"Page {page} processed. Performers scraped: {processed_count}, Remaining: {total_remaining}.")
