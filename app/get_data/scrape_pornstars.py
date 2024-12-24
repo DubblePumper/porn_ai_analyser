@@ -16,10 +16,26 @@ if not API_KEY:
     raise ValueError("API key for ThePornDB is not set. Please check your .env file.")
 
 # Global constants
+# Define paths to use in the script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPT_DIR)
 OUTPUT_DIR = os.path.join(BASE_DIR, 'datasets', 'pornstar_images')
 JSON_PATH = os.path.join(BASE_DIR, 'datasets', 'performers_data.json')
+
+# Create the output directory if it doesn't exist
+os.makedirs(OUTPUT_DIR, exist_ok=True) 
+
+# OTHER CONSTANTS
+START_PAGE = 54
+MAX_PERFORMERS = 150000
+MAX_RETRIES = 10
+RETRY_DELAY = 10
+MAX_IMAGE_QUALITY = 85
+# Update paths to use raw strings
+OUTPUT_DIR = r"{}".format(OUTPUT_DIR)
+JSON_PATH = r"{}".format(JSON_PATH)
+
+
 
 # Utility functions
 def log_message(message):
@@ -43,9 +59,9 @@ def save_performers(json_path, performers):
         log_message(f"Error saving performers: {e}")
         raise
 
-def performer_exists(performer_id, performers):
-    """Check if a performer already exists by ID."""
-    return any(p.get('id') == performer_id for p in performers if isinstance(p, dict))
+def performer_exists(performer_name, performers):
+    """Check if a performer already exists by name."""
+    return any(p.get('name', '').strip().lower() == performer_name.strip().lower() for p in performers if isinstance(p, dict))
 
 def sanitize_name(name):
     """Sanitize the name to ensure it's valid for file systems."""
@@ -60,7 +76,7 @@ def get_performer_folder_name(first_name, last_name):
     sanitized_last_name = sanitize_name(last_name)
     return f"{sanitized_first_name}_{sanitized_last_name}"
 
-def optimize_image(image_path, quality=85):
+def optimize_image(image_path, quality=MAX_IMAGE_QUALITY):
     """Optimize image for reduced file size."""
     try:
         with Image.open(image_path) as img:
@@ -71,7 +87,7 @@ def optimize_image(image_path, quality=85):
     except Exception as e:
         log_message(f"Error optimizing image {image_path}: {e}")
 
-def download_image(url, file_path, max_retries=10, retry_delay=10):
+def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Download a single image with retries."""
     if not url.startswith('http'):
         log_message(f"Invalid URL: {url}. Skipping download.")
@@ -105,7 +121,7 @@ def download_image(url, file_path, max_retries=10, retry_delay=10):
             log_message(f"Max retries reached for image. Skipping: {file_path}")
     return None
 
-def download_images(urls, first_name, last_name, max_retries=10, retry_delay=10):
+def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Download images for a performer with retries using multithreading."""
     performer_folder_name = get_performer_folder_name(first_name, last_name)
     folder_path = os.path.join(OUTPUT_DIR, performer_folder_name)
@@ -131,7 +147,7 @@ def download_images(urls, first_name, last_name, max_retries=10, retry_delay=10)
 
     return downloaded_paths
 
-def get_theporndb_details(performer_name, max_retries=10, retry_delay=10):
+def get_theporndb_details(performer_name, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Fetch performer details from ThePornDB with retries."""
     encoded_name = urllib.parse.quote(performer_name.strip())
     search_url = f"https://api.theporndb.net/performers?q={encoded_name}"
@@ -150,38 +166,40 @@ def get_theporndb_details(performer_name, max_retries=10, retry_delay=10):
             name_parts = performer_data.get('name', '').split(' ')
             first_name = name_parts[0]
             last_name = name_parts[1] if len(name_parts) > 1 else ''
+            image_urls = download_images(
+                urls=[poster['url'] for poster in performer_data.get('posters', [])],
+                first_name=first_name,
+                last_name=last_name,
+            )
             return {
-                    'id': performer_data.get('id', ''),
-        'slug': performer_data.get('slug', ''),
-        'name': performer_data.get('name', ''),
-        'bio': performer_data.get('bio', ''),
-        'rating': performer_data.get('rating', ''),
-        'is_parent': performer_data.get('extras', {}).get('is_parent', False),
-        'gender': performer_data.get('extras', {}).get('gender', ''),
-        'birthday': performer_data.get('extras', {}).get('birthday', ''),
-        'deathday': performer_data.get('extras', {}).get('deathday', ''),
-        'birthplace': performer_data.get('extras', {}).get('birthplace', ''),
-        'ethnicity': performer_data.get('extras', {}).get('ethnicity', ''),
-        'nationality': performer_data.get('extras', {}).get('nationality', ''),
-        'hair_color': performer_data.get('extras', {}).get('hair_colour', ''),
-        'eye_color': performer_data.get('extras', {}).get('eye_colour', ''),
-        'height': performer_data.get('extras', {}).get('height', ''),
-        'weight': performer_data.get('extras', {}).get('weight', ''),
-        'measurements': performer_data.get('extras', {}).get('measurements', ''),
-        'waist_size': performer_data.get('extras', {}).get('waist', ''),
-        'hip_size': performer_data.get('extras', {}).get('hips', ''),
-        'cup_size': performer_data.get('extras', {}).get('cupsize', ''),
-        'tattoos': performer_data.get('extras', {}).get('tattoos', ''),
-        'piercings': performer_data.get('extras', {}).get('piercings', ''),
-        'fake_boobs': performer_data.get('extras', {}).get('fake_boobs', False),
-        'same_sex_only': performer_data.get('extras', {}).get('same_sex_only', False),
-        'career_start_year': performer_data.get('extras', {}).get('career_start_year', ''),
-        'career_end_year': performer_data.get('extras', {}).get('career_end_year', ''),
-        'image_urls': download_images(
-            urls=[poster['url'] for poster in performer_data.get('posters', [])],
-            first_name=first_name,
-            last_name=last_name,
-        )
+                'id': performer_data.get('id', ''),
+                'slug': performer_data.get('slug', ''),
+                'name': performer_data.get('name', ''),
+                'bio': performer_data.get('bio', ''),
+                'rating': performer_data.get('rating', ''),
+                'is_parent': performer_data.get('extras', {}).get('is_parent', False),
+                'gender': performer_data.get('extras', {}).get('gender', ''),
+                'birthday': performer_data.get('extras', {}).get('birthday', ''),
+                'deathday': performer_data.get('extras', {}).get('deathday', ''),
+                'birthplace': performer_data.get('extras', {}).get('birthplace', ''),
+                'ethnicity': performer_data.get('extras', {}).get('ethnicity', ''),
+                'nationality': performer_data.get('extras', {}).get('nationality', ''),
+                'hair_color': performer_data.get('extras', {}).get('hair_colour', ''),
+                'eye_color': performer_data.get('extras', {}).get('eye_colour', ''),
+                'height': performer_data.get('extras', {}).get('height', ''),
+                'weight': performer_data.get('extras', {}).get('weight', ''),
+                'measurements': performer_data.get('extras', {}).get('measurements', ''),
+                'waist_size': performer_data.get('extras', {}).get('waist', ''),
+                'hip_size': performer_data.get('extras', {}).get('hips', ''),
+                'cup_size': performer_data.get('extras', {}).get('cupsize', ''),
+                'tattoos': performer_data.get('extras', {}).get('tattoos', ''),
+                'piercings': performer_data.get('extras', {}).get('piercings', ''),
+                'fake_boobs': performer_data.get('extras', {}).get('fake_boobs', False),
+                'same_sex_only': performer_data.get('extras', {}).get('same_sex_only', False),
+                'career_start_year': performer_data.get('extras', {}).get('career_start_year', ''),
+                'career_end_year': performer_data.get('extras', {}).get('career_end_year', ''),
+                'image_urls': image_urls,
+                'image_amount': len(image_urls)
             }
         except requests.RequestException as e:
             log_message(f"Attempt {attempt + 1} failed for performer {performer_name}: {e}")
@@ -196,7 +214,19 @@ def count_performer_images(performer):
     """Count the number of images a performer has."""
     return len(performer.get('image_urls', []))
 
-def scrape_performers(max_performers=150, start_page=40):
+def performer_images_exist(performer_details):
+    """Check if all images for a performer already exist in the folder."""
+    name_parts = performer_details['name'].split(' ')
+    first_name = name_parts[0]
+    last_name = name_parts[1] if len(name_parts) > 1 else ''
+    performer_folder_name = get_performer_folder_name(first_name, last_name)
+    folder_path = os.path.join(OUTPUT_DIR, performer_folder_name)
+    if not os.path.exists(folder_path):
+        return False
+    existing_images = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+    return len(existing_images) >= performer_details['image_amount']
+
+def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
     """Scrape performers from Pornhub."""
     performers = load_existing_performers(JSON_PATH)
     total_existing_performers = len(performers)
@@ -206,42 +236,46 @@ def scrape_performers(max_performers=150, start_page=40):
     scraper = cloudscraper.create_scraper()
     processed_count = 0
 
-    for page in range(start_page, start_page + max_performers):
-        log_message(f"Processing page {page}.")
-        response = scraper.get(f"{base_url}{page}")
-        soup = BeautifulSoup(response.content, 'html.parser')
-        performer_cards = soup.find_all('li', class_='pornstarLi performerCard')
+    try:
+        for page in range(start_page, start_page + max_performers):
+            log_message(f"Processing page {page}.")
+            response = scraper.get(f"{base_url}{page}")
+            soup = BeautifulSoup(response.content, 'html.parser')
+            performer_cards = soup.find_all('li', class_='pornstarLi performerCard')
 
-        if not performer_cards:
-            log_message(f"No performers found on page {page}. Ending scrape.")
-            break
+            if not performer_cards:
+                log_message(f"No performers found on page {page}. Ending scrape.")
+                break
 
-        for card in performer_cards:
-            name_tag = card.find('span', class_='pornStarName performerCardName')
-            if name_tag:
-                name = name_tag.get_text()
-                if any(p.get('name') == name for p in performers if isinstance(p, dict)):
-                    log_message(f"Page {page} | Performer {name} already exists in JSON, skipping.")
-                    continue
-                else:
-                    log_message(f"Page {page} | Performer {name} does not exist in JSON, processing.")
+            for card in performer_cards:
+                name_tag = card.find('span', class_='pornStarName performerCardName')
+                if name_tag:
+                    name = name_tag.get_text()
+                    performer_details = get_theporndb_details(name)
+                    if performer_details and not performer_exists(performer_details['name'], performers):
+                        log_message(f"Page {page} | Performer {name} does not exist in JSON, processing.")
+                    if performer_details and not performer_exists(performer_details['name'], performers):
+                        name_parts = performer_details['name'].split(' ')
+                        first_name = name_parts[0]
+                        last_name = name_parts[1] if len(name_parts) > 1 else ''
+                        if performer_images_exist(performer_details):
+                            log_message(f"Performer {performer_details['name']} already has the required number of images. Skipping API call.")
+                            continue
+                        performer_details['image_urls'] = download_images(performer_details.get('image_urls', []), first_name, last_name)
+                        if performer_details['image_urls']:  # Check if performer has images
+                            performers.append(performer_details)
+                            save_performers(JSON_PATH, performers)
+                            image_count = count_performer_images(performer_details)
+                            log_message(f"Performer {performer_details['name']} has {image_count} images.")
+                            processed_count += 1
 
-                performer_details = get_theporndb_details(name)
-                if performer_details and not performer_exists(performer_details['id'], performers):
-                    name_parts = performer_details['name'].split(' ')
-                    first_name = name_parts[0]
-                    last_name = name_parts[1] if len(name_parts) > 1 else ''
-                    performer_details['image_urls'] = download_images(performer_details.get('image_urls', []), first_name, last_name)
-                    if performer_details['image_urls']:  # Check if performer has images
-                        performers.append(performer_details)
-                        save_performers(JSON_PATH, performers)
-                        image_count = count_performer_images(performer_details)
-                        log_message(f"Performer {performer_details['name']} has {image_count} images.")
-                        processed_count += 1
-
-        total_remaining = max_performers - processed_count
-        log_message(f"Page {page} processed. Performers scraped: {processed_count}, Remaining: {total_remaining}.")
-        time.sleep(2)
+            total_remaining = max_performers - processed_count
+            log_message(f"Page {page} processed. Performers scraped: {processed_count}, Remaining: {total_remaining}.")
+            time.sleep(2)
+    except KeyboardInterrupt:
+        log_message(f"Scraping interrupted. Last processed page: {page}.")
+    except Exception as e:
+        log_message(f"Error occurred: {e}. Last processed page: {page}.")
 
     log_message(f"Scraping completed. Total performers processed: {processed_count}. Total performers now: {len(performers)}.")
     return performers
