@@ -26,7 +26,7 @@ JSON_PATH = os.path.join(BASE_DIR, 'datasets', 'performers_data.json')
 os.makedirs(OUTPUT_DIR, exist_ok=True) 
 
 # OTHER CONSTANTS
-START_PAGE = 70
+START_PAGE = 90
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 10
