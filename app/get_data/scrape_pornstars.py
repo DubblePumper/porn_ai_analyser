@@ -253,7 +253,7 @@ def count_performer_images(performer):
     """Count the number of images a performer has."""
     return len(performer.get('image_urls', []))
 
-def performer_images_exist(performer_details):
+def performer_images_exist_by_checking_if_every_image_excist(performer_details):
     """Check if all images for a performer already exist in the folder."""
     name_parts = performer_details['name'].split(' ')
     first_name = name_parts[0]
@@ -263,7 +263,16 @@ def performer_images_exist(performer_details):
     if not os.path.exists(folder_path):
         return False
     existing_images = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
-    return len(existing_images) >= performer_details['image_amount']
+    return len(existing_images) >= performer_details.get('image_amount', 0)
+
+def check_and_save_performer(performer_details, performers, json_path):
+    """Check if performer exists in JSON and save if not."""
+    if not performer_exists(performer_details['name'], performers):
+        log_message(f"Performer {performer_details['name']} does not exist in JSON, saving.")
+        performers.append(performer_details)
+        save_performers(json_path, performers)
+    else:
+        log_message(f"Performer {performer_details['name']} already exists in JSON.")
 
 def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
     """Scrape performers from Pornhub."""
@@ -304,13 +313,12 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
                         name_parts = performer_details['name'].split(' ')
                         first_name = name_parts[0]
                         last_name = name_parts[1] if len(name_parts) > 1 else ''
-                        if performer_images_exist(performer_details):
-                            log_message(f"Performer {performer_details['name']} already has the required number of images. Skipping API call.")
+                        if performer_images_exist_by_checking_if_every_image_excist(performer_details) and performer_exists(performer_details['name'], performers):
+                            log_message(f"Performer {performer_details['name']} already has the required number of images and exists in JSON. Skipping API call.")
                             continue
                         performer_details['image_urls'] = download_images(performer_details.get('image_urls', []), first_name, last_name)
                         if performer_details['image_urls']:  # Check if performer has images
-                            performers.append(performer_details)
-                            save_performers(JSON_PATH, performers)
+                            check_and_save_performer(performer_details, performers, JSON_PATH)
                             image_count = count_performer_images(performer_details)
                             log_message(f"Performer {performer_details['name']} has {image_count} images.")
                             total_images_downloaded += image_count
