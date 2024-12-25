@@ -26,7 +26,7 @@ JSON_PATH = os.path.join(BASE_DIR, 'datasets', 'performers_data.json')
 os.makedirs(OUTPUT_DIR, exist_ok=True) 
 
 # OTHER CONSTANTS
-START_PAGE = 90
+START_PAGE = 145
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 10
@@ -35,7 +35,10 @@ MAX_IMAGE_QUALITY = 85
 OUTPUT_DIR = r"{}".format(OUTPUT_DIR)
 JSON_PATH = r"{}".format(JSON_PATH)
 
-
+# Define the maximum and minimum number of threads
+MAX_THREADS = 30
+MIN_THREADS = 2
+current_threads = MAX_THREADS
 
 # Utility functions
 def log_message(message):
@@ -89,6 +92,7 @@ def optimize_image(image_path, quality=MAX_IMAGE_QUALITY):
 
 def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Download a single image with retries."""
+    global current_threads
     if not url.startswith('http'):
         log_message(f"Invalid URL: {url}. Skipping download.")
         return None
@@ -114,6 +118,9 @@ def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DE
                 log_message(f"Attempt {attempt + 1}: Failed to download image from {url}, status code: {response.status_code}, response text: {response.text}.")
         except requests.RequestException as e:
             log_message(f"Attempt {attempt + 1}: Error downloading image: {e}")
+            if "WinError 10055" in str(e):
+                current_threads = max(current_threads - 1, MIN_THREADS)
+                log_message(f"Socket error encountered. Reducing thread count to {current_threads}.")
         if attempt < max_retries - 1:
             log_message(f"Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
@@ -123,13 +130,14 @@ def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DE
 
 def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Download images for a performer with retries using multithreading."""
+    global current_threads
     performer_folder_name = get_performer_folder_name(first_name, last_name)
     folder_path = os.path.join(OUTPUT_DIR, performer_folder_name)
     os.makedirs(folder_path, exist_ok=True)
     downloaded_paths = []
     image_count = len(urls)
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=current_threads) as executor:
         futures = []
         for index, url in enumerate(urls):
             image_filename = f"{performer_folder_name}_{index + 1}.jpg"
@@ -144,6 +152,9 @@ def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_
             result = future.result()
             if result:
                 downloaded_paths.append(result)
+                if current_threads < MAX_THREADS:
+                    current_threads += 1
+                    log_message(f"Increasing thread count to {current_threads}.")
 
     return downloaded_paths
 
