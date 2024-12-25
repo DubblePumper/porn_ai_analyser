@@ -23,11 +23,18 @@ BASE_DIR = os.path.dirname(SCRIPT_DIR)
 OUTPUT_DIR = os.path.join(BASE_DIR, 'datasets', 'pornstar_images')
 JSON_PATH = os.path.join(BASE_DIR, 'datasets', 'performers_data.json')
 
+
 # Create the output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True) 
+# check if the JSON file exists if not create the file
+if not os.path.exists(JSON_PATH):
+    with open(JSON_PATH, 'w') as file:
+        json.dump([], file)
+        
 
 # OTHER CONSTANTS
-START_PAGE = 182
+# 182
+START_PAGE = 1
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 30
