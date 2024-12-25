@@ -8,6 +8,7 @@ from PIL import Image
 from dotenv import load_dotenv
 import urllib.parse
 import concurrent.futures
+import signal
 
 # Load environment variables
 load_dotenv()
@@ -26,10 +27,10 @@ JSON_PATH = os.path.join(BASE_DIR, 'datasets', 'performers_data.json')
 os.makedirs(OUTPUT_DIR, exist_ok=True) 
 
 # OTHER CONSTANTS
-START_PAGE = 145
+START_PAGE = 182
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
-RETRY_DELAY = 10
+RETRY_DELAY = 30
 MAX_IMAGE_QUALITY = 85
 # Update paths to use raw strings
 OUTPUT_DIR = r"{}".format(OUTPUT_DIR)
@@ -37,8 +38,18 @@ JSON_PATH = r"{}".format(JSON_PATH)
 
 # Define the maximum and minimum number of threads
 MAX_THREADS = 30
-MIN_THREADS = 2
+MIN_THREADS = 1
 current_threads = MAX_THREADS
+stop_requested = False
+
+# Signal handler for graceful shutdown
+def signal_handler(sig, frame):
+    global stop_requested
+    log_message("Graceful shutdown requested.")
+    stop_requested = True
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 # Utility functions
 def log_message(message):
@@ -57,9 +68,9 @@ def save_performers(json_path, performers):
     try:
         with open(json_path, 'w') as file:
             json.dump(performers, file, indent=4)
-        log_message("Performers successfully saved.")
+        log_message(f"Performers successfully saved to {json_path}.")
     except Exception as e:
-        log_message(f"Error saving performers: {e}")
+        log_message(f"Error saving performers to {json_path}: {e}")
         raise
 
 def performer_exists(performer_name, performers):
@@ -92,12 +103,15 @@ def optimize_image(image_path, quality=MAX_IMAGE_QUALITY):
 
 def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Download a single image with retries."""
-    global current_threads
+    global current_threads, stop_requested
     if not url.startswith('http'):
         log_message(f"Invalid URL: {url}. Skipping download.")
         return None
 
     for attempt in range(max_retries):
+        if stop_requested:
+            log_message("Download interrupted by user.")
+            return None
         try:
             scraper = cloudscraper.create_scraper()
             response = scraper.get(url, stream=True)
@@ -130,7 +144,7 @@ def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DE
 
 def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Download images for a performer with retries using multithreading."""
-    global current_threads
+    global current_threads, stop_requested
     performer_folder_name = get_performer_folder_name(first_name, last_name)
     folder_path = os.path.join(OUTPUT_DIR, performer_folder_name)
     os.makedirs(folder_path, exist_ok=True)
@@ -140,6 +154,9 @@ def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_
     with concurrent.futures.ThreadPoolExecutor(max_workers=current_threads) as executor:
         futures = []
         for index, url in enumerate(urls):
+            if stop_requested:
+                log_message("Image download interrupted by user.")
+                break
             image_filename = f"{performer_folder_name}_{index + 1}.jpg"
             file_path = os.path.join(folder_path, image_filename)
             if os.path.exists(file_path):
@@ -149,6 +166,9 @@ def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_
             futures.append(executor.submit(download_image, url, file_path, max_retries, retry_delay))
 
         for future in concurrent.futures.as_completed(futures):
+            if stop_requested:
+                log_message("Image download interrupted by user.")
+                break
             result = future.result()
             if result:
                 downloaded_paths.append(result)
@@ -158,7 +178,7 @@ def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_
 
     return downloaded_paths
 
-def get_theporndb_details(performer_name, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
+def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Fetch performer details from ThePornDB with retries."""
     encoded_name = urllib.parse.quote(performer_name.strip())
     search_url = f"https://api.theporndb.net/performers?q={encoded_name}"
@@ -191,7 +211,7 @@ def get_theporndb_details(performer_name, max_retries=MAX_RETRIES, retry_delay=R
                 'is_parent': performer_data.get('extras', {}).get('is_parent', False),
                 'gender': performer_data.get('extras', {}).get('gender', ''),
                 'birthday': performer_data.get('extras', {}).get('birthday', ''),
-                'deathday': performer_data.get('extras', {}).get('deathday', ''),
+                'deathday': performer_data.get('deathday', ''),
                 'birthplace': performer_data.get('extras', {}).get('birthplace', ''),
                 'ethnicity': performer_data.get('extras', {}).get('ethnicity', ''),
                 'nationality': performer_data.get('extras', {}).get('nationality', ''),
@@ -210,7 +230,8 @@ def get_theporndb_details(performer_name, max_retries=MAX_RETRIES, retry_delay=R
                 'career_start_year': performer_data.get('extras', {}).get('career_start_year', ''),
                 'career_end_year': performer_data.get('extras', {}).get('career_end_year', ''),
                 'image_urls': image_urls,
-                'image_amount': len(image_urls)
+                'image_amount': len(image_urls),
+                'page': page  # Add page number to performer details
             }
         except requests.RequestException as e:
             log_message(f"Attempt {attempt + 1} failed for performer {performer_name}: {e}")
@@ -239,6 +260,7 @@ def performer_images_exist(performer_details):
 
 def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
     """Scrape performers from Pornhub."""
+    global stop_requested
     performers = load_existing_performers(JSON_PATH)
     total_existing_performers = len(performers)
     log_message(f"Found {total_existing_performers} existing performers.")
@@ -246,9 +268,13 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
     base_url = "https://nl.pornhub.com/pornstars?performerType=pornstar&page="
     scraper = cloudscraper.create_scraper()
     processed_count = 0
+    total_images_downloaded = 0
 
     try:
         for page in range(start_page, start_page + max_performers):
+            if stop_requested:
+                log_message("Scraping interrupted by user.")
+                break
             log_message(f"Processing page {page}.")
             response = scraper.get(f"{base_url}{page}")
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -259,13 +285,15 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
                 break
 
             for card in performer_cards:
+                if stop_requested:
+                    log_message("Scraping interrupted by user.")
+                    break
                 name_tag = card.find('span', class_='pornStarName performerCardName')
                 if name_tag:
                     name = name_tag.get_text()
-                    performer_details = get_theporndb_details(name)
+                    performer_details = get_theporndb_details(name, page)
                     if performer_details and not performer_exists(performer_details['name'], performers):
                         log_message(f"Page {page} | Performer {name} does not exist in JSON, processing.")
-                    if performer_details and not performer_exists(performer_details['name'], performers):
                         name_parts = performer_details['name'].split(' ')
                         first_name = name_parts[0]
                         last_name = name_parts[1] if len(name_parts) > 1 else ''
@@ -278,6 +306,7 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
                             save_performers(JSON_PATH, performers)
                             image_count = count_performer_images(performer_details)
                             log_message(f"Performer {performer_details['name']} has {image_count} images.")
+                            total_images_downloaded += image_count
                             processed_count += 1
 
             total_remaining = max_performers - processed_count
@@ -289,6 +318,7 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
         log_message(f"Error occurred: {e}. Last processed page: {page}.")
 
     log_message(f"Scraping completed. Total performers processed: {processed_count}. Total performers now: {len(performers)}.")
+    log_message(f"Total images downloaded: {total_images_downloaded}.")
     return performers
 
 # Main entry point
