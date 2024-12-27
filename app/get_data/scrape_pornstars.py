@@ -36,6 +36,7 @@ if not os.path.exists(JSON_PATH):
         
 
 # OTHER CONSTANTS
+# set the start page to 0 to start from the last page in the JSON file
 START_PAGE = 1
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
