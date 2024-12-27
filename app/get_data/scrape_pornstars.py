@@ -33,8 +33,7 @@ if not os.path.exists(JSON_PATH):
         
 
 # OTHER CONSTANTS
-# 182
-START_PAGE = 167
+START_PAGE = 184 
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 30
@@ -274,12 +273,35 @@ def check_and_save_performer(performer_details, performers, json_path):
     else:
         log_message(f"Performer {performer_details['name']} already exists in JSON.")
 
+
+def count_all_images_in_json(json_path):
+    """Count the total number of images for all performers in the JSON file."""
+    performers = load_existing_performers(json_path)
+    total_images = sum(performer.get('image_amount', 0) for performer in performers)
+    return total_images
+
+def get_latest_page_from_json(json_path, default_start_page):
+    """Get the latest page number from the JSON file."""    
+    performers = load_existing_performers(json_path)
+    if not performers:
+        return default_start_page
+    if START_PAGE != 0:
+        return START_PAGE
+
+    latest_page = max(performer.get('page', default_start_page) for performer in performers)
+    return latest_page
+
 def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
     """Scrape performers from Pornhub."""
     global stop_requested
     performers = load_existing_performers(JSON_PATH)
     total_existing_performers = len(performers)
     log_message(f"Found {total_existing_performers} existing performers.")
+
+    # Get the latest page from JSON if START_PAGE is not set
+    if start_page == START_PAGE:
+        start_page = get_latest_page_from_json(JSON_PATH, START_PAGE)
+    log_message(f"Starting from page {start_page}.")
 
     base_url = "https://nl.pornhub.com/pornstars?performerType=pornstar&page="
     scraper = cloudscraper.create_scraper()
@@ -325,6 +347,7 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
                             processed_count += 1
 
             total_remaining = max_performers - processed_count
+            total_images = count_all_images_in_json(JSON_PATH)
             log_message(f"Page {page} processed. Performers scraped: {processed_count}, Remaining: {total_remaining}.")
             time.sleep(2)
     except KeyboardInterrupt:
@@ -333,8 +356,9 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
         log_message(f"Error occurred: {e}. Last processed page: {page}.")
 
     log_message(f"Scraping completed. Total performers processed: {processed_count}. Total performers now: {len(performers)}.")
-    log_message(f"Total images downloaded: {total_images_downloaded}.")
+    log_message(f"Total images downloaded: {total_images}.")
     return performers
+
 
 # Main entry point
 def main():
