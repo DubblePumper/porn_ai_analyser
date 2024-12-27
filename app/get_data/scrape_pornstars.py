@@ -36,7 +36,7 @@ if not os.path.exists(JSON_PATH):
         
 
 # OTHER CONSTANTS
-START_PAGE = 0 
+START_PAGE = 1
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 30
@@ -45,8 +45,14 @@ MAX_IMAGE_QUALITY = 85
 OUTPUT_DIR = r"{}".format(OUTPUT_DIR)
 JSON_PATH = r"{}".format(JSON_PATH)
 
+def get_max_threads():
+    try:
+        return os.cpu_count() or 1
+    except Exception:
+        return 1  # Fallback als er geen informatie beschikbaar is
+
 # Define the maximum and minimum number of threads
-MAX_THREADS = 30
+MAX_THREADS = get_max_threads()
 MIN_THREADS = 1
 current_threads = MAX_THREADS
 stop_requested = False
@@ -72,11 +78,12 @@ def load_existing_performers(json_path):
             return json.load(file)
     return []
 
+
 def save_performers(json_path, performers):
     """Save performers to JSON file."""
     try:
-        with open(json_path, 'w') as file:
-            json.dump(performers, file, indent=4)
+        with open(json_path, 'w', encoding='utf-8') as file:
+            json.dump(performers, file, indent=4, ensure_ascii=False)
         log_message(f"Performers successfully saved to {json_path}.")
     except Exception as e:
         log_message(f"Error saving performers to {json_path}: {e}")
@@ -306,6 +313,8 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
         start_page = get_latest_page_from_json(JSON_PATH, START_PAGE)
     log_message(f"Starting from page {start_page}.")
 
+    # https://nl.pornhub.com/pornstars?page= -- last page 1694
+    # https://nl.pornhub.com/pornstars?performerType=pornstar&page= -- last page 332
     base_url = "https://nl.pornhub.com/pornstars?performerType=pornstar&page="
     scraper = cloudscraper.create_scraper()
     processed_count = 0
@@ -365,7 +374,7 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
 
 # Main entry point
 def main():
-    log_message("Starting performer scrape.")
+    log_message("Starting performer scrape. max amount of threads: " + str(MAX_THREADS))
     scrape_performers()
 
 if __name__ == '__main__':
