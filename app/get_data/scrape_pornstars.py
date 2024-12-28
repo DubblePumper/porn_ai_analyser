@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import urllib.parse
 import concurrent.futures
 import signal
+import psutil
 
 # Load environment variables
 load_dotenv()
@@ -37,7 +38,7 @@ if not os.path.exists(JSON_PATH):
 
 # OTHER CONSTANTS
 # set the start page to 0 to start from the last page in the JSON file
-START_PAGE = 1
+START_PAGE = 37
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 30
@@ -46,14 +47,26 @@ MAX_IMAGE_QUALITY = 85
 OUTPUT_DIR = r"{}".format(OUTPUT_DIR)
 JSON_PATH = r"{}".format(JSON_PATH)
 
-def get_max_threads():
-    try:
-        return os.cpu_count() or 1
-    except Exception:
-        return 1  # Fallback als er geen informatie beschikbaar is
+def bereken_max_threads(ram_per_thread_mb=20):
+    # Totale RAM in MB
+    total_ram = psutil.virtual_memory().total / (1024 * 1024)
+
+    # Beschikbare RAM in MB
+    available_ram = psutil.virtual_memory().available / (1024 * 1024)
+
+    # Aantal beschikbare CPU-cores
+    cpu_count = os.cpu_count()
+
+    # Maximale threads gebaseerd op RAM
+    max_threads_ram = available_ram // ram_per_thread_mb
+
+    # Echte limiet is het minimum van beide factoren
+    max_threads = min(max_threads_ram, cpu_count * 2)  # Voor I/O-taken kun je 2x CPU-cores nemen
+
+    return max_threads
 
 # Define the maximum and minimum number of threads
-MAX_THREADS = get_max_threads()
+MAX_THREADS =  bereken_max_threads()
 MIN_THREADS = 1
 current_threads = MAX_THREADS
 stop_requested = False
@@ -78,6 +91,8 @@ def load_existing_performers(json_path):
         with open(json_path, 'r') as file:
             return json.load(file)
     return []
+
+
 
 
 def save_performers(json_path, performers):
