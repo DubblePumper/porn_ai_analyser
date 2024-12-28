@@ -57,6 +57,12 @@ def count_images(performers):
             total_images += len(performer['image_urls'])
     return total_images
 
+def calculate_average_images(total_images, total_performers):
+    """Calculate the average number of images per performer."""
+    if total_performers == 0:
+        return 0
+    return total_images / total_performers
+
 def main():
     
     # alura-jenson
@@ -65,8 +71,10 @@ def main():
     unique_performers = remove_duplicates(performers)
     save_performers(JSON_PATH, unique_performers)
     total_images = count_images(unique_performers)
+    average_images = calculate_average_images(total_images, len(unique_performers))
     print(f"Removed duplicates. Total performers: {len(unique_performers)}")
     print(f"Total images: {total_images}")
+    print(f"Average images per performer: {average_images:.2f}")
 
 if __name__ == '__main__':
     main()

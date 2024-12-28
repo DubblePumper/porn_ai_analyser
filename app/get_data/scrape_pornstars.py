@@ -38,10 +38,10 @@ if not os.path.exists(JSON_PATH):
 
 # OTHER CONSTANTS
 # set the start page to 0 to start from the last page in the JSON file
-START_PAGE = 37
+START_PAGE = 1509
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
-RETRY_DELAY = 30
+RETRY_DELAY = 15
 MAX_IMAGE_QUALITY = 85
 # Update paths to use raw strings
 OUTPUT_DIR = r"{}".format(OUTPUT_DIR)
@@ -331,10 +331,11 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
 
     # https://nl.pornhub.com/pornstars?page= -- last page 1694
     # https://nl.pornhub.com/pornstars?performerType=pornstar&page= -- last page 332
-    base_url = "https://nl.pornhub.com/pornstars?performerType=pornstar&page="
+    base_url = "https://nl.pornhub.com/pornstars?page="
     scraper = cloudscraper.create_scraper()
     processed_count = 0
     total_images_downloaded = 0
+    total_images = 0
 
     try:
         for page in range(start_page, start_page + max_performers):
@@ -344,7 +345,8 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
             log_message(f"Processing page {page}.")
             response = scraper.get(f"{base_url}{page}")
             soup = BeautifulSoup(response.content, 'html.parser')
-            performer_cards = soup.find_all('li', class_='pornstarLi performerCard')
+            
+            performer_cards = soup.find_all('li', class_=['pornstarLi performerCard','modelLi performerCard', 'pornstarWrap performerCard"'])
 
             if not performer_cards:
                 log_message(f"No performers found on page {page}. Ending scrape.")
@@ -354,7 +356,7 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
                 if stop_requested:
                     log_message("Scraping interrupted by user.")
                     break
-                name_tag = card.find('span', class_='pornStarName performerCardName')
+                name_tag = card.find('span', class_=['pornStarName performerCardName', 'modelName performerCardName'] )
                 if name_tag:
                     name = name_tag.get_text()
                     performer_details = get_theporndb_details(name, page)
