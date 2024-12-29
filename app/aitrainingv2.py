@@ -69,8 +69,21 @@ model = models.Sequential([
 model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 logging.info("Model gecompileerd met optimizer 'adam' en loss 'sparse_categorical_crossentropy'.")
 
+# Function to check if an image is corrupt
+def is_image_corrupt(path):
+    try:
+        img = Image.open(path)
+        img.verify()  # Verify that it is, in fact, an image
+        return False
+    except (UnidentifiedImageError, IOError):
+        return True
+
 # Custom function to handle image loading errors
 def safe_load_img(path, target_size):
+    if is_image_corrupt(path):
+        logging.error(f"Corrupt image file: {path}")
+        # Return a blank image if loading failed
+        return np.zeros((target_size[0], target_size[1], 3))
     try:
         img = load_img(path, target_size=target_size)
         return img_to_array(img) / 255.0  # Normalize to 0-1
