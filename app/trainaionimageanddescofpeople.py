@@ -12,20 +12,25 @@ import numpy as np
 import random
 import warnings
 import json
+from torch.amp import GradScaler, autocast
+import logging
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
+# Zet de logging-configuratie op
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # Configuratie
 LEARNING_RATE = 0.0001
-BATCH_SIZE = 20
-NUM_EPOCHS = 20
+BATCH_SIZE = 10
+NUM_EPOCHS = 100
 IMG_SIZE = 160  # VGGFace2 gebruikt 160x160 afbeeldingen
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ENABLE_RANDOMIZATION = True  # Boolean to enable or disable randomization
-NUM_PREDICTIONS = 100  # Global variable for the number of predictions
-ENABLE_REALTIME_VISUALIZATION = False  # Global variable to enable or disable real-time visualization
+NUM_PREDICTIONS = 5000  # Global variable for the number of predictions
+ENABLE_REALTIME_VISUALIZATION = True  # Global variable to enable or disable real-time visualization
 ENABLE_JSON_LOGGING = False  # Global variable to enable or disable JSON logging
-GRADUATION_RANDOMIZATION_AMOUNT = 5  # Gradually increase the randomization amount
+GRADUATION_RANDOMIZATION_AMOUNT = 3  # Gradually increase the randomization amount
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -38,6 +43,7 @@ os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
 
 # Transformaties (meer randomisatie toegevoegd)
 def get_transform(enable_randomization, phase):
+    logging.info(f"Getting transform for phase {phase} with randomization {'enabled' if enable_randomization else 'disabled'}")
     if enable_randomization:
         if phase == 1:
             return transforms.Compose([
@@ -75,7 +81,7 @@ def get_transform(enable_randomization, phase):
 # Dataset
 class PersonDataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
-        print(f"Loading dataset from {csv_file}")
+        logging.info(f"Loading dataset from {csv_file}")
         self.data = pd.read_csv(csv_file)
         self.img_dir = img_dir
         self.transform = transform
@@ -86,7 +92,7 @@ class PersonDataset(Dataset):
         self.labels = {name: idx for idx, name in enumerate(unique_names)}
         self.num_classes = len(self.labels)
 
-        print(f"Dataset loaded with {len(self.data)} valid images and {self.num_classes} classes")
+        logging.info(f"Dataset loaded with {len(self.data)} valid images and {self.num_classes} classes")
 
     def _has_image(self, name):
         img_name = f"{name.replace(' ', '_')}.jpg"
@@ -141,6 +147,7 @@ class CustomInceptionResnetV1(InceptionResnetV1):
             return self.classifier(features)
 
 def build_model(num_classes):
+    logging.info(f"Building model with {num_classes} classes")
     model = CustomInceptionResnetV1(pretrained='vggface2', classify=False).to(DEVICE)
     model.num_classes = num_classes  # Set the number of classes
     model.classifier = nn.Linear(model.feature_dim, num_classes).to(DEVICE)
@@ -154,7 +161,8 @@ def build_model(num_classes):
 
     return model
 
-def show_images_realtime(images, labels, predictions, img_names, epoch, fig, axes):
+def show_images_realtime(images, labels, predictions, img_names, epoch, fig, axes, label_names):
+    logging.info(f"Visualizing images for epoch {epoch}")
     # De-normalize the images
     mean = torch.tensor([0.485, 0.456, 0.406]).to(images.device)
     std = torch.tensor([0.229, 0.224, 0.225]).to(images.device)
@@ -172,15 +180,17 @@ def show_images_realtime(images, labels, predictions, img_names, epoch, fig, axe
         ax.imshow(grid[i])
 
         true_label = labels[i].item()
+        true_name = label_names[true_label]
         predicted_labels = predictions[:, i].cpu().numpy()
+        predicted_names = [label_names[pred] for pred in predicted_labels]
 
         # Determine if the prediction is correct or incorrect
         is_correct = "Correct" if true_label in predicted_labels else "Incorrect"
 
         # Place each prediction side by side
-        predicted_labels_str = " ".join(map(str, predicted_labels))
+        predicted_labels_str = " ".join(predicted_names)
 
-        ax.set_title(f"True: {true_label}\nPred: {predicted_labels_str}\n{is_correct}", fontsize=8)
+        ax.set_title(f"True: {true_name}\nPred: {predicted_labels_str}\n{is_correct}", fontsize=8)
         ax.axis('off')
 
     for i in range(num_images, len(axes)):
@@ -191,6 +201,7 @@ def show_images_realtime(images, labels, predictions, img_names, epoch, fig, axe
     plt.pause(0.001)  # Zorg ervoor dat de update zichtbaar is
 
 def calculate_bonus(predictions, true_label):
+    logging.info(f"Calculating bonus for true label {true_label}")
     # Calculate the bonus based on the distance of the predictions to the correct label
     distances = torch.abs(predictions - true_label)
     min_distance = torch.min(distances).item()
@@ -201,6 +212,7 @@ def calculate_bonus(predictions, true_label):
     return 0.0  # No bonus if no prediction is within the max distance
 
 def load_prediction_log():
+    logging.info("Loading prediction log")
     if not ENABLE_JSON_LOGGING:
         return {}
     if os.path.exists(LOG_FILE_PATH):
@@ -208,17 +220,19 @@ def load_prediction_log():
             with open(LOG_FILE_PATH, 'r') as log_file:
                 return json.load(log_file)
         except json.JSONDecodeError:
-            print("Error decoding JSON log file. Starting with an empty log.")
+            logging.error("Error decoding JSON log file. Starting with an empty log.")
             return {}
     return {}
 
 def save_prediction_log(log_data):
+    logging.info("Saving prediction log")
     if not ENABLE_JSON_LOGGING:
         return
     with open(LOG_FILE_PATH, 'w') as log_file:
         json.dump(log_data, log_file, indent=4)
 
 def log_predictions(log_data, img_name, true_label, predictions):
+    logging.info(f"Logging predictions for image {img_name}")
     if not ENABLE_JSON_LOGGING:
         return
     is_correct = true_label in predictions
@@ -241,6 +255,7 @@ def log_predictions(log_data, img_name, true_label, predictions):
         }
 
 def get_previous_predictions(img_name):
+    logging.info(f"Getting previous predictions for image {img_name}")
     if not ENABLE_JSON_LOGGING:
         return []
     log_data = load_prediction_log()
@@ -250,38 +265,51 @@ def get_previous_predictions(img_name):
 
 # Function to save the model state
 def save_model_state(model, path):
+    logging.info(f"Saving model state to {path}")
     torch.save(model.state_dict(), path)
 
 # Function to load the model state
 def load_model_state(model, path):
+    logging.info(f"Loading model state from {path}")
     if os.path.exists(path):
         map_location = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model.load_state_dict(torch.load(path, map_location=map_location))
+        state_dict = torch.load(path, map_location=map_location, weights_only=True)
+        
+        # Filter out mismatched keys
+        model_state_dict = model.state_dict()
+        filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict and v.size() == model_state_dict[k].size()}
+        
+        model_state_dict.update(filtered_state_dict)
+        model.load_state_dict(model_state_dict)
         model.train()
 
 # Trainen van het model
 def train_model():
+    logging.info("Starting model training")
     # Laad dataset
     phase = 1  # Start with phase 1 of randomization
     transform = get_transform(ENABLE_RANDOMIZATION, phase)
     dataset = PersonDataset(CSV_PATH, IMG_DIR, transform)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)  # Increase num_workers
 
     model = build_model(dataset.num_classes)
     criterion = nn.CrossEntropyLoss()  # Gebruik CrossEntropyLoss voor eenvoud
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scaler = GradScaler()  # Initialize GradScaler for mixed precision training
 
     # Maak de figuur voor visualisatie
     if ENABLE_REALTIME_VISUALIZATION:
+        plt.ion()  # Enable interactive mode
         fig, axes = plt.subplots(4, 4, figsize=(16, 8))
         axes = axes.flatten()
+        plt.show(block=False)  # Display the figure without blocking
 
     # Laad de log data
     log_data = load_prediction_log()
 
     # Begin training
     for epoch in range(NUM_EPOCHS):
-        print(f"Epoch [{epoch + 1}/{NUM_EPOCHS}]")
+        logging.info(f"Epoch [{epoch + 1}/{NUM_EPOCHS}]")
 
         # Load model state if it exists
         load_model_state(model, MODEL_SAVE_PATH)
@@ -296,19 +324,22 @@ def train_model():
 
             optimizer.zero_grad()
 
-            # Forward pass
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
+            # Mixed precision training
+            with autocast(device_type='cuda'):
+                outputs = model(images)
+                loss = criterion(outputs, labels)
 
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item()
 
             # Verkrijg NUM_PREDICTIONS verschillende voorspellingen voor elke afbeelding in de batch
             predictions = []
             for _ in range(NUM_PREDICTIONS):
-                output = model(images)
+                with autocast(device_type='cuda'):
+                    output = model(images)
                 _, predicted = torch.max(output, 1)
                 predictions.append(predicted)
 
@@ -330,29 +361,29 @@ def train_model():
 
             # Log batch progress
             if (i % BATCH_SIZE == 0):  # Log progress every batch
-                print(f"Epoch [{epoch + 1}] | Batch [{i}/{len(dataloader)}], Loss: {loss.item()}, Accuracy: {accuracy:.10f}, Bonus: {total_bonus / total:.4f}")
-                print(f"{correct_guesses} correct / {incorrect_guesses} incorrect - total guesses: {correct_guesses + incorrect_guesses}")
+                logging.info(f"Epoch [{epoch + 1}] | Batch [{i}/{len(dataloader)}], Loss: {loss.item()}, Accuracy: {accuracy:.10f}, Bonus: {total_bonus / total:.4f}")
+                logging.info(f"{correct_guesses} correct / {incorrect_guesses} incorrect - total guesses: {correct_guesses + incorrect_guesses}")
 
             # Visualiseer de afbeeldingen en de voorspellingen
             if ENABLE_REALTIME_VISUALIZATION and (i % BATCH_SIZE == 0):  # Update the plot every batch
-                show_images_realtime(images, labels, predictions, img_names, epoch, fig, axes)
+                show_images_realtime(images, labels, predictions, img_names, epoch, fig, axes, dataset.labels)
 
-        print(f"Epoch [{epoch + 1}/{NUM_EPOCHS}], Loss: {running_loss / len(dataloader)}, Accuracy: {accuracy:.10f}, Bonus: {total_bonus / total:.4f}")
+        logging.info(f"Epoch [{epoch + 1}/{NUM_EPOCHS}], Loss: {running_loss / len(dataloader)}, Accuracy: {accuracy:.10f}, Bonus: {total_bonus / total:.4f}")
 
         # Bewaar de log data na elke epoch
         save_prediction_log(log_data)
-        print(f"Saved prediction log to {LOG_FILE_PATH}")
+        logging.info(f"Saved prediction log to {LOG_FILE_PATH}")
 
         # Bewaar het model na elke epoch
         save_model_state(model, MODEL_SAVE_PATH)
-        print(f"Saved model state to {MODEL_SAVE_PATH}")
+        logging.info(f"Saved model state to {MODEL_SAVE_PATH}")
 
         # Gradually increase the randomization phase
         if ENABLE_RANDOMIZATION and (epoch + 1) % (NUM_EPOCHS // GRADUATION_RANDOMIZATION_AMOUNT) == 0:
             phase += 1
             transform = get_transform(ENABLE_RANDOMIZATION, phase)
             dataset = PersonDataset(CSV_PATH, IMG_DIR, transform)
-            dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+            dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)  # Increase num_workers
 
 if __name__ == '__main__':
     train_model()
