@@ -2,4 +2,4 @@
 /app/.model_cache/checkpoints/
 /app/ai_things/
 /app/.env
-/app/performer_recognition_model.keras
+performer_recognition_model.keras
