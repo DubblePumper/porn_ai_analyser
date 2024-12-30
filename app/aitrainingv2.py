@@ -39,21 +39,22 @@ performer_info = {performer['slug']: performer for performer in performer_data}
 # Controleer of het laden van de JSON correct was
 logging.info(f"Gegevens van {len(performer_info)} performers geladen.")
 
-# Check if TensorFlow can detect the GPU
-physical_devices = tf.config.list_physical_devices('GPU')
-if len(physical_devices) > 0:
-    print("TensorFlow detected a GPU.")
-    for device in physical_devices:
-        print(f"Device: {device}")
-else:
-    print("TensorFlow did not detect a GPU.")
+# Check if TensorFlow can detect the GPU and required libraries are available
+def check_gpu_availability():
+    try:
+        physical_devices = tf.config.list_physical_devices('GPU')
+        if len(physical_devices) > 0:
+            tf.config.experimental.set_memory_growth(physical_devices[0], True)
+            logging.info(f"GPU found: {physical_devices[0].name}")
+            return True
+        else:
+            logging.warning("No GPU found. Using CPU instead.")
+            return False
+    except Exception as e:
+        logging.error(f"Error checking GPU availability: {e}")
+        return False
 
-# Verify GPU availability
-if len(physical_devices) > 0:
-    tf.config.experimental.set_memory_growth(physical_devices[0], True)
-    logging.info(f"GPU found: {physical_devices[0].name}")
-else:
-    logging.warning("No GPU found. Using CPU instead.")
+gpu_available = check_gpu_availability()
 
 # Laad VGG16 zonder de laatste lagen
 logging.info("Laad VGG16 model zonder top lagen...")
@@ -175,7 +176,7 @@ validation_generator_with_metadata = custom_data_generator(validation_generator)
 # Train het model
 logging.info("Start met trainen van het model...")
 try:
-    with tf.device('/GPU:0' if len(physical_devices) > 0 else '/CPU:0'):
+    with tf.device('/GPU:0' if gpu_available else '/CPU:0'):
         history = model.fit(
             train_generator_with_metadata,
             epochs=MAX_EPOCHS,
