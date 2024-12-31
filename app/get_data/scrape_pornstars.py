@@ -164,6 +164,7 @@ def download_image(url, file_path, max_retries=MAX_RETRIES, retry_delay=RETRY_DE
             if "WinError 10055" in str(e):
                 current_threads = max(current_threads - 1, MIN_THREADS)
                 log_message(f"Socket error encountered. Reducing thread count to {current_threads}.")
+                wait_for_internet_connection()  # Wait for internet connection to be restored
         if attempt < max_retries - 1:
             log_message(f"Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
@@ -206,6 +207,21 @@ def download_images(urls, first_name, last_name, max_retries=MAX_RETRIES, retry_
                     log_message(f"Increasing thread count to {current_threads}.")
 
     return downloaded_paths
+
+def check_internet_connection():
+    """Check if the internet connection is available."""
+    try:
+        requests.get("https://www.google.com", timeout=5)
+        return True
+    except requests.RequestException:
+        return False
+
+def wait_for_internet_connection():
+    """Wait until the internet connection is restored."""
+    log_message("Waiting for internet connection to be restored...")
+    while not check_internet_connection():
+        time.sleep(5)
+    log_message("Internet connection restored.")
 
 def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     """Fetch performer details from ThePornDB with retries."""
@@ -266,6 +282,10 @@ def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_d
             }
         except requests.RequestException as e:
             log_message(f"Attempt {attempt + 1} failed for performer {performer_name}: {e}")
+            if "WinError 10055" in str(e):
+                current_threads = max(current_threads - 1, MIN_THREADS)
+                log_message(f"Socket error encountered. Reducing thread count to {current_threads}.")
+                wait_for_internet_connection()  # Wait for internet connection to be restored
             if attempt < max_retries - 1:
                 log_message(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
