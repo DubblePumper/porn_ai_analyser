@@ -92,9 +92,6 @@ def load_existing_performers(json_path):
             return json.load(file)
     return []
 
-
-
-
 def save_performers(json_path, performers):
     """Save performers to JSON file."""
     try:
@@ -234,6 +231,7 @@ def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_d
                 first_name=first_name,
                 last_name=last_name,
             )
+            performer_folder_name = get_performer_folder_name(first_name, last_name)
             return {
                 'id': performer_data.get('id', ''),
                 'slug': performer_data.get('slug', ''),
@@ -263,6 +261,7 @@ def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_d
                 'career_end_year': performer_data.get('extras', {}).get('career_end_year', ''),
                 'image_urls': image_urls,
                 'image_amount': len(image_urls),
+                'image_folder': performer_folder_name,  # Add folder name to performer details
                 'page': page  # Add page number to performer details
             }
         except requests.RequestException as e:

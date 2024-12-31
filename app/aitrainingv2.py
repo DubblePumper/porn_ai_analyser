@@ -17,6 +17,7 @@ MAX_EPOCHS = 10
 BATCH_SIZE = 8
 dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
 performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_data.json"
+output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
 
 # Zet de logging-configuratie op
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,9 +30,24 @@ print(f"Cuda Version: {cuda_version}")
 print(f"Cudnn version: {cudnn_version}")
 print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 
+def count_performers_in_json(json_path):
+    with open(json_path, 'r') as f:
+        performer_data = json.load(f)
+    return len(performer_data)
+
+print("total performers found in jsonfile " + str(count_performers_in_json(performer_data_path)))
+
+def count_subfolders(path):
+    subfolders = [name for name in os.listdir(path) if os.path.isdir(os.path.join(path, name))]
+    return len(subfolders)
+
+print("total performers found subfolders " + str(count_subfolders(dataset_path)))
 # Laad performer data uit JSON
 with open(performer_data_path, 'r') as f:
     performer_data = json.load(f)
+
+# Log the number of performers in the JSON file
+logging.info(f"Total performers in JSON: {len(performer_data)}")
 
 # Maak een dictionary van performer id naar gegevens
 performer_info = {performer['slug']: performer for performer in performer_data}
@@ -56,25 +72,6 @@ def check_gpu_availability():
 
 gpu_available = check_gpu_availability()
 
-# Laad VGG16 zonder de laatste lagen
-logging.info("Laad VGG16 model zonder top lagen...")
-base_model = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
-base_model.trainable = False  # Bevries de convolutionele lagen
-logging.info("VGG16 model geladen en de convolutionele lagen bevroren.")
-
-# Bouw het aangepaste model
-logging.info("Bouwen van het aangepaste model...")
-model = models.Sequential([
-    base_model,
-    layers.Flatten(),
-    layers.Dense(256, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(len(performer_info), activation='softmax')  # Aantal performers
-])
-
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-logging.info("Model gecompileerd met optimizer 'adam' en loss 'sparse_categorical_crossentropy'.")
-
 # Functie om te controleren of een afbeelding corrupt is
 def is_image_corrupt(path):
     try:
@@ -98,89 +95,112 @@ def safe_load_img(path, target_size):
         # Return a blank image if loading failed
         return np.zeros((target_size[0], target_size[1], 3))
 
-# Functie om performer-details uit de filename te halen
-def get_performer_details_from_filename(filename):
-    # Haal de performer_slug uit de mapnaam, zet alles om naar kleine letters en vervang underscores door streepjes
-    performer_slug = filename.split(os.sep)[-2].lower().replace('_', '-')
-    logging.debug(f"Extracted performer slug: {performer_slug}")
+# Create dataset with metadata
+def create_dataset_with_metadata_from_json(performer_info, output_path):
+    data = []
+    performer_found = 0
+    total_files_found = 0
+    total_performers = len(performer_info)
     
-    # Zoeken naar performer in de JSON-gegevens met dezelfde slug (ook omgezet)
-    performer = None
-    for p in performer_info.values():  # Correctly iterate over the values of the dictionary
-        # Zorg ervoor dat de slug uit de JSON hetzelfde wordt aangepast (lowercase en underscores vervangen door streepjes)
-        json_slug = p['slug'].lower().replace('_', '-')
-        logging.debug(f"Comparing with JSON slug: {json_slug}")
+    for performer in performer_info.values():
+        performer_found += 1
+        performer_images_found = 0
+        total_images = len(performer['image_urls'])
+        logging.info(f"Processing performer {performer_found}/{total_performers}: {performer['name']} with {total_images} images")
         
-        if performer_slug == json_slug:
-            performer = p
-            break
-    
-    if performer:
-        return performer['name'], performer['birthday'], performer['ethnicity'], performer['hair_color'], performer['image_urls']
-    else:
-        logging.warning(f"Geen gegevens gevonden voor performer met slug: {performer_slug}")
-        return None
+        for image_path in performer['image_urls']:
+            performer_images_found += 1
+            total_files_found += 1
+            logging.info(f"Processing image {performer_images_found}/{total_images} for performer {performer_found}/{total_performers}")
+            
+            if os.path.isfile(image_path):
+                img_array = safe_load_img(image_path, target_size=(224, 224))
+                data.append({
+                    'image': img_array,
+                    'details': {
+                        'id': performer.get('id', None),
+                        'slug': performer.get('slug', None),
+                        'name': performer.get('name', None),
+                        'bio': performer.get('bio', None),
+                        'rating': performer.get('rating', None),
+                        'is_parent': performer.get('is_parent', None),
+                        'gender': performer.get('gender', None),
+                        'birthday': performer.get('birthday', None),
+                        'deathday': performer.get('deathday', None),
+                        'birthplace': performer.get('birthplace', None),
+                        'ethnicity': performer.get('ethnicity', None),
+                        'nationality': performer.get('nationality', None),
+                        'hair_color': performer.get('hair_color', None),
+                        'eye_color': performer.get('eye_color', None),
+                        'height': performer.get('height', None),
+                        'weight': performer.get('weight', None),
+                        'measurements': performer.get('measurements', None),
+                        'waist_size': performer.get('waist_size', None),
+                        'hip_size': performer.get('hip_size', None),
+                        'cup_size': performer.get('cup_size', None),
+                        'tattoos': performer.get('tattoos', None),
+                        'piercings': performer.get('piercings', None),
+                        'fake_boobs': performer.get('fake_boobs', None),
+                        'same_sex_only': performer.get('same_sex_only', None),
+                        'career_start_year': performer.get('career_start_year', None),
+                        'career_end_year': performer.get('career_end_year', None),
+                        'image_urls': performer.get('image_urls', None),
+                        'image_amount': performer.get('image_amount', None),
+                        'page': performer.get('page', None)
+                    }
+                })
+            else:
+                logging.warning(f"Image file not found: {image_path}")
+    np.save(output_path, data)
+    logging.info(f"Dataset with metadata saved to {output_path}")
+    logging.info(f"Total performers processed: {performer_found}")
+    logging.info(f"Total images processed: {total_files_found}")
 
-# Custom function for preprocessing and augmentation
-def custom_preprocessing_function(img):
-    if img is None:
-        return np.zeros((224, 224, 3))  # Return a blank image if loading failed
-    return img
+# Create the dataset with metadata
+create_dataset_with_metadata_from_json(performer_info, output_dataset_path)
 
-# Gebruik ImageDataGenerator voor data augmentatie en batch verwerking
-train_datagen = ImageDataGenerator(
-    rescale=1./255,
-    validation_split=0.2,  # Gebruik 20% van de data voor validatie
-    horizontal_flip=True,
-    rotation_range=30,
-    zoom_range=0.2,
-    shear_range=0.2,
-    brightness_range=[0.8, 1.2],
-    preprocessing_function=custom_preprocessing_function
-)
+# Load the dataset
+dataset = np.load(output_dataset_path, allow_pickle=True)
 
-# Pas de ImageDataGenerator aan om extra metadata toe te voegen
-def custom_data_generator(generator):
-    for data_batch, label_batch in generator:
-        if data_batch is None or label_batch is None:
-            logging.error("Received None data batch or label batch.")
-            continue
-        for i in range(len(generator.filenames)):
-            logging.debug(f"Processing file: {generator.filenames[i]}")
-        metadata = [get_performer_details_from_filename(generator.filenames[i]) for i in range(len(generator.filenames))]
-        yield data_batch, label_batch, metadata
+# Prepare the data for training
+images = np.array([item['image'] for item in dataset])
+labels = np.array([item['details']['slug'] for item in dataset])
 
-train_generator = train_datagen.flow_from_directory(
-    dataset_path,
-    target_size=(224, 224),
-    batch_size=BATCH_SIZE,
-    class_mode='sparse',
-    subset='training',
-    shuffle=True
-)
+# Encode labels
+label_to_index = {label: index for index, label in enumerate(np.unique(labels))}
+encoded_labels = np.array([label_to_index[label] for label in labels])
 
-train_generator_with_metadata = custom_data_generator(train_generator)
+# Split the data into training and validation sets
+from sklearn.model_selection import train_test_split
+x_train, x_val, y_train, y_val = train_test_split(images, encoded_labels, test_size=0.2, random_state=42)
 
-# Zelfde voor de validatie generator
-validation_generator = train_datagen.flow_from_directory(
-    dataset_path,
-    target_size=(224, 224),
-    batch_size=BATCH_SIZE,
-    class_mode='sparse',
-    subset='validation',
-    shuffle=True
-)
+# Laad VGG16 zonder de laatste lagen
+logging.info("Laad VGG16 model zonder top lagen...")
+base_model = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+base_model.trainable = False  # Bevries de convolutionele lagen
+logging.info("VGG16 model geladen en de convolutionele lagen bevroren.")
 
-validation_generator_with_metadata = custom_data_generator(validation_generator)
+# Bouw het aangepaste model
+logging.info("Bouwen van het aangepaste model...")
+model = models.Sequential([
+    base_model,
+    layers.Flatten(),
+    layers.Dense(256, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(len(label_to_index), activation='softmax')  # Aantal performers
+])
+
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+logging.info("Model gecompileerd met optimizer 'adam' en loss 'sparse_categorical_crossentropy'.")
 
 # Train het model
 logging.info("Start met trainen van het model...")
 try:
     with tf.device('/GPU:0' if gpu_available else '/CPU:0'):
         history = model.fit(
-            train_generator_with_metadata,
+            x_train, y_train,
             epochs=MAX_EPOCHS,
-            validation_data=validation_generator_with_metadata
+            validation_data=(x_val, y_val)
         )
 except Exception as e:
     logging.error(f"Error during model training: {e}")
@@ -208,7 +228,7 @@ def predict_performer(image_path):
     predicted_class_index = np.argmax(prediction)
     
     # Verkrijg de performer details uit de JSON met de voorspelde index
-    predicted_performer = list(performer_info.keys())[predicted_class_index]
+    predicted_performer = list(label_to_index.keys())[predicted_class_index]
     performer_details = performer_info.get(predicted_performer)
 
     if performer_details:
