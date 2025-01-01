@@ -50,6 +50,13 @@ def remove_duplicates(performers):
     print(f"Found {len(duplicates)} duplicates: {duplicates}")
     return list(seen.values())
 
+def count_performers_in_json(performers):
+    total_performers = 0
+    for performer in performers:
+        if 'performers' in performer and isinstance(performer['id'], list):
+            total_performers += len(performer['performers'])
+    return total_performers
+
 def count_images(performers):
     total_images = 0
     for performer in performers:
@@ -72,7 +79,8 @@ def main():
     save_performers(JSON_PATH, unique_performers)
     total_images = count_images(unique_performers)
     average_images = calculate_average_images(total_images, len(unique_performers))
-    print(f"Removed duplicates. Total performers: {len(unique_performers)}")
+    print(f"Removed duplicates from {len(performers)} performers.")
+    print(f"total performers found: {count_performers_in_json(performers)}")
     print(f"Total images: {total_images}")
     print(f"Average images per performer: {average_images:.2f}")
 

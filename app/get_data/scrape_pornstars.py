@@ -38,7 +38,7 @@ if not os.path.exists(JSON_PATH):
 
 # OTHER CONSTANTS
 # set the start page to 0 to start from the last page in the JSON file
-START_PAGE = 0
+START_PAGE = 1
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 15
@@ -350,7 +350,7 @@ def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
 
     # https://nl.pornhub.com/pornstars?page= -- last page 1694
     # https://nl.pornhub.com/pornstars?performerType=pornstar&page= -- last page 332
-    base_url = "https://nl.pornhub.com/pornstars?page="
+    base_url = "https://nl.pornhub.com/pornstars?performerType=pornstar&page="
     scraper = cloudscraper.create_scraper()
     processed_count = 0
     total_images_downloaded = 0
