@@ -38,7 +38,7 @@ if not os.path.exists(JSON_PATH):
 
 # OTHER CONSTANTS
 # set the start page to 0 to start from the last page in the JSON file
-START_PAGE = 99
+START_PAGE = 50
 MAX_PERFORMERS = 150000
 MAX_RETRIES = 10
 RETRY_DELAY = 15
@@ -248,6 +248,7 @@ def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_d
                 last_name=last_name,
             )
             performer_folder_name = get_performer_folder_name(first_name, last_name)
+            performer_number = 0
             return {
                 'id': performer_data.get('id', ''),
                 'slug': performer_data.get('slug', ''),
@@ -278,8 +279,10 @@ def get_theporndb_details(performer_name, page, max_retries=MAX_RETRIES, retry_d
                 'image_urls': image_urls,
                 'image_amount': len(image_urls),
                 'image_folder': performer_folder_name,  # Add folder name to performer details
-                'page': page  # Add page number to performer details
+                'page': page,  # Add page number to performer details
+                'performer_number': performer_number # Add performer number to performer details
             }
+            performer_number += 1
         except requests.RequestException as e:
             log_message(f"Attempt {attempt + 1} failed for performer {performer_name}: {e}")
             if "WinError 10055" in str(e):
@@ -336,83 +339,64 @@ def get_latest_page_from_json(json_path, default_start_page):
     latest_page = max(performer.get('page', default_start_page) for performer in performers)
     return latest_page
 
-def scrape_performers(max_performers=MAX_PERFORMERS, start_page=START_PAGE):
-    """Scrape performers from Pornhub."""
+def scrape_performers_from_json(json_path, max_performers=MAX_PERFORMERS):
+    """Scrape performers from JSON file."""
     global stop_requested
     performers = load_existing_performers(JSON_PATH)
     total_existing_performers = len(performers)
     log_message(f"Found {total_existing_performers} existing performers.")
 
-    # Get the latest page from JSON if START_PAGE is not set
-    if start_page == START_PAGE:
-        start_page = get_latest_page_from_json(JSON_PATH, START_PAGE)
-    log_message(f"Starting from page {start_page}.")
+    # Load performers from JSON file
+    with open(json_path, 'r', encoding='utf-8') as file:
+        json_data = json.load(file)
 
-    # https://nl.pornhub.com/pornstars?page= -- last page 1694
-    # https://nl.pornhub.com/pornstars?performerType=pornstar&page= -- last page 332
-    base_url = "https://nl.pornhub.com/pornstars?performerType=pornstar&page="
-    scraper = cloudscraper.create_scraper()
     processed_count = 0
     total_images_downloaded = 0
-    total_images = 0
 
     try:
-        for page in range(start_page, start_page + max_performers):
+        for performer_data in json_data:
             if stop_requested:
                 log_message("Scraping interrupted by user.")
                 break
-            log_message(f"Processing page {page}.")
-            response = scraper.get(f"{base_url}{page}")
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            performer_cards = soup.find_all('li', class_=['pornstarLi performerCard','modelLi performerCard', 'pornstarWrap performerCard"'])
 
-            if not performer_cards:
-                log_message(f"No performers found on page {page}. Ending scrape.")
+            name = performer_data.get('name', '')
+            if not name:
+                continue
+
+            performer_details = get_theporndb_details(name, performer_data.get('page', 0))
+            if performer_details and not performer_exists(performer_details['name'], performers):
+                log_message(f"Performer {name} does not exist in JSON, processing.")
+                name_parts = performer_details['name'].split(' ')
+                first_name = name_parts[0]
+                last_name = name_parts[1] if len(name_parts) > 1 else ''
+                if performer_images_exist_by_checking_if_every_image_excist(performer_details) and performer_exists(performer_details['name'], performers):
+                    log_message(f"Performer {performer_details['name']} already has the required number of images and exists in JSON. Skipping API call.")
+                    continue
+                performer_details['image_urls'] = download_images(performer_details.get('image_urls', []), first_name, last_name)
+                if performer_details['image_urls']:  # Check if performer has images
+                    check_and_save_performer(performer_details, performers, JSON_PATH)
+                    image_count = count_performer_images(performer_details)
+                    log_message(f"Performer {performer_details['name']} has {image_count} images.")
+                    total_images_downloaded += image_count
+                    processed_count += 1
+
+            if processed_count >= max_performers:
                 break
 
-            for card in performer_cards:
-                if stop_requested:
-                    log_message("Scraping interrupted by user.")
-                    break
-                name_tag = card.find('span', class_=['pornStarName performerCardName', 'modelName performerCardName'] )
-                if name_tag:
-                    name = name_tag.get_text()
-                    performer_details = get_theporndb_details(name, page)
-                    if performer_details and not performer_exists(performer_details['name'], performers):
-                        log_message(f"Page {page} | Performer {name} does not exist in JSON, processing.")
-                        name_parts = performer_details['name'].split(' ')
-                        first_name = name_parts[0]
-                        last_name = name_parts[1] if len(name_parts) > 1 else ''
-                        if performer_images_exist_by_checking_if_every_image_excist(performer_details) and performer_exists(performer_details['name'], performers):
-                            log_message(f"Performer {performer_details['name']} already has the required number of images and exists in JSON. Skipping API call.")
-                            continue
-                        performer_details['image_urls'] = download_images(performer_details.get('image_urls', []), first_name, last_name)
-                        if performer_details['image_urls']:  # Check if performer has images
-                            check_and_save_performer(performer_details, performers, JSON_PATH)
-                            image_count = count_performer_images(performer_details)
-                            log_message(f"Performer {performer_details['name']} has {image_count} images.")
-                            total_images_downloaded += image_count
-                            processed_count += 1
-
-            total_remaining = max_performers - processed_count
-            total_images = count_all_images_in_json(JSON_PATH)
-            log_message(f"Page {page} processed. Performers scraped: {processed_count}, Remaining: {total_remaining}.")
-            time.sleep(2)
+        total_images = count_all_images_in_json(JSON_PATH)
+        log_message(f"Performers processed: {processed_count}. Total performers now: {len(performers)}.")
+        log_message(f"Total images downloaded: {total_images}.")
     except KeyboardInterrupt:
-        log_message(f"Scraping interrupted. Last processed page: {page}.")
+        log_message("Scraping interrupted.")
     except Exception as e:
-        log_message(f"Error occurred: {e}. Last processed page: {page}.")
+        log_message(f"Error occurred: {e}.")
 
-    log_message(f"Scraping completed. Total performers processed: {processed_count}. Total performers now: {len(performers)}.")
-    log_message(f"Total images downloaded: {total_images}.")
     return performers
-
 
 # Main entry point
 def main():
     log_message("Starting performer scrape. max amount of threads: " + str(MAX_THREADS))
-    scrape_performers()
+    scrape_performers_from_json(JSON_PATH)
 
 if __name__ == '__main__':
     main()
