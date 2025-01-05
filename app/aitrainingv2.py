@@ -13,10 +13,10 @@ from PIL import UnidentifiedImageError, Image
 from tensorflow.python.platform import build_info as build
 
 # Instellingen
-MAX_EPOCHS = 10
+MAX_EPOCHS = 20
 BATCH_SIZE = 8
 dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
-performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_data.json"
+performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json"
 output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
 
 # Zet de logging-configuratie op
@@ -146,11 +146,15 @@ def create_dataset_with_metadata_from_json(performer_info, output_path):
                         'career_end_year': performer.get('career_end_year', None),
                         'image_urls': performer.get('image_urls', None),
                         'image_amount': performer.get('image_amount', None),
-                        'page': performer.get('page', None)
+                        'page': performer.get('page', None),
+                        'performer_number': performer.get('performer_number', None),
+                        'image_folder': performer.get('image_folder', None)  # Added field
                     }
                 })
             else:
                 logging.warning(f"Image file not found: {image_path}")
+    
+    logging.info("Finished processing all performers and images.")
     np.save(output_path, data)
     logging.info(f"Dataset with metadata saved to {output_path}")
     logging.info(f"Total performers processed: {performer_found}")
