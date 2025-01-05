@@ -183,37 +183,43 @@ logging.info("Creating dataset with metadata...")
 create_dataset_with_metadata_from_json(performer_info, output_dataset_path)
 logging.info("Dataset creation complete.")
 
+# Prepare the data for training using tf.data.Dataset
+def load_image_and_label(image_path, label):
+    logging.info(f"Loading image and label for item: {image_path.numpy().decode('utf-8')}")
+    image = safe_load_img(image_path.numpy().decode('utf-8'), target_size=(224, 224))
+    logging.info(f"Loaded image and label for item: {image_path.numpy().decode('utf-8')}")
+    return image, label
+
 # Load the dataset
 logging.info("Loading dataset...")
 dataset = np.load(output_dataset_path, allow_pickle=True)
 logging.info("Dataset loaded.")
 
-# Prepare the data for training using tf.data.Dataset
-def load_image_and_label(item):
-    logging.info(f"Loading image and label for item: {item['image_path']}")
-    image = safe_load_img(item['image_path'], target_size=(224, 224))
-    label = label_to_index[item['details']['slug']]
-    logging.info(f"Loaded image and label for item: {item['image_path']}")
+# Create a list of image paths and labels
+image_paths = [item['image_path'] for item in dataset]
+labels = [label_to_index[item['details']['slug']] for item in dataset]
+
+# Create a tf.data.Dataset from the image paths and labels
+logging.info("Creating tf.data.Dataset from image paths and labels...")
+dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
+
+# Add image counter
+total_images = len(image_paths)
+processed_images = 0
+
+def map_fn_with_counter(image_path, label):
+    global processed_images
+    image, label = tf.py_function(
+        func=load_image_and_label, inp=[image_path, label], Tout=(tf.float32, tf.int32)
+    )
+    image = tf.ensure_shape(image, (224, 224, 3))
+    label = tf.ensure_shape(label, ())
+    processed_images += 1
+    logging.info(f"Processed {processed_images}/{total_images} images")
     return image, label
 
-def data_generator(dataset):
-    logging.info("Starting data generator...")
-    for index, item in enumerate(dataset):
-        start_time = time.time()
-        logging.info(f"Processing item {index + 1}")
-        yield load_image_and_label(item)
-        end_time = time.time()
-        logging.info(f"Processed item {index + 1} - Time taken: {end_time - start_time:.2f} seconds.")
+dataset = dataset.map(map_fn_with_counter, num_parallel_calls=tf.data.AUTOTUNE)
 
-# Create a tf.data.Dataset from the generator
-logging.info("Creating tf.data.Dataset from generator...")
-dataset = tf.data.Dataset.from_generator(
-    lambda: data_generator(dataset),
-    output_signature=(
-        tf.TensorSpec(shape=(224, 224, 3), dtype=tf.float32),
-        tf.TensorSpec(shape=(), dtype=tf.int32)
-    )
-)
 logging.info("tf.data.Dataset created.")
 
 # Split the dataset into training and validation sets
