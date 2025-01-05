@@ -114,9 +114,8 @@ def create_dataset_with_metadata_from_json(performer_info, output_path):
             logging.info(f"Processing image {performer_images_found}/{total_images} for performer {performer_found}/{total_performers}")
             
             if os.path.isfile(image_path):
-                img_array = safe_load_img(image_path, target_size=(224, 224))
                 data.append({
-                    'image': img_array,
+                    'image_path': image_path,
                     'details': {
                         'id': performer.get('id', None),
                         'slug': performer.get('slug', None),
@@ -166,17 +165,35 @@ create_dataset_with_metadata_from_json(performer_info, output_dataset_path)
 # Load the dataset
 dataset = np.load(output_dataset_path, allow_pickle=True)
 
-# Prepare the data for training
-images = np.array([item['image'] for item in dataset])
-labels = np.array([item['details']['slug'] for item in dataset])
+# Prepare the data for training using tf.data.Dataset
+def load_image_and_label(item):
+    image = safe_load_img(item['image_path'], target_size=(224, 224))
+    label = label_to_index[item['details']['slug']]
+    return image, label
 
-# Encode labels
-label_to_index = {label: index for index, label in enumerate(np.unique(labels))}
-encoded_labels = np.array([label_to_index[label] for label in labels])
+def data_generator(dataset):
+    for item in dataset:
+        yield load_image_and_label(item)
 
-# Split the data into training and validation sets
-from sklearn.model_selection import train_test_split
-x_train, x_val, y_train, y_val = train_test_split(images, encoded_labels, test_size=0.2, random_state=42)
+# Create a tf.data.Dataset from the generator
+dataset = tf.data.Dataset.from_generator(
+    lambda: data_generator(dataset),
+    output_signature=(
+        tf.TensorSpec(shape=(224, 224, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(), dtype=tf.int32)
+    )
+)
+
+# Split the dataset into training and validation sets
+dataset_size = len(list(dataset))
+train_size = int(0.8 * dataset_size)
+val_size = dataset_size - train_size
+train_dataset = dataset.take(train_size)
+val_dataset = dataset.skip(train_size)
+
+# Batch and prefetch the datasets
+train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+val_dataset = val_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
 # Laad VGG16 zonder de laatste lagen
 logging.info("Laad VGG16 model zonder top lagen...")
@@ -202,9 +219,9 @@ logging.info("Start met trainen van het model...")
 try:
     with tf.device('/GPU:0' if gpu_available else '/CPU:0'):
         history = model.fit(
-            x_train, y_train,
+            train_dataset,
             epochs=MAX_EPOCHS,
-            validation_data=(x_val, y_val)
+            validation_data=val_dataset
         )
 except Exception as e:
     logging.error(f"Error during model training: {e}")
