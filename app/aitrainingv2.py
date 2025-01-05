@@ -8,9 +8,10 @@ import logging
 from tensorflow import keras
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras import layers, models
-from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from PIL import UnidentifiedImageError, Image
 from tensorflow.python.platform import build_info as build
+import time
 
 # Instellingen
 MAX_EPOCHS = 20
@@ -20,7 +21,7 @@ performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers
 output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
 
 # Zet de logging-configuratie op
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levellevel)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # TensorFlow versie en GPU informatie
 logging.info(f"tensorflow version: {tf.__version__}")
@@ -31,33 +32,44 @@ logging.info(f"Cudnn version: {cudnn_version}")
 logging.info("Num GPUs Available: %d", len(tf.config.list_physical_devices('GPU')))
 
 def count_performers_in_json(json_path):
+    logging.info(f"Counting performers in JSON file: {json_path}")
     with open(json_path, 'r') as f:
         performer_data = json.load(f)
-    return len(performer_data)
+    count = len(performer_data)
+    logging.info(f"Total performers found in JSON file: {count}")
+    return count
 
 logging.info("Total performers found in JSON file: %d", count_performers_in_json(performer_data_path))
 
 def count_subfolders(path):
+    logging.info(f"Counting subfolders in path: {path}")
     subfolders = [name for name in os.listdir(path) if os.path.isdir(os.path.join(path, name))]
-    return len(subfolders)
+    count = len(subfolders)
+    logging.info(f"Total subfolders found: {count}")
+    return count
 
 logging.info("Total performers found in subfolders: %d", count_subfolders(dataset_path))
 
 # Laad performer data uit JSON
+logging.info(f"Loading performer data from JSON file: {performer_data_path}")
 with open(performer_data_path, 'r') as f:
     performer_data = json.load(f)
-
-# Log the number of performers in the JSON file
-logging.info(f"Total performers in JSON: {len(performer_data)}")
+logging.info(f"Loaded performer data for {len(performer_data)} performers.")
 
 # Maak een dictionary van performer id naar gegevens
+logging.info("Creating performer info dictionary...")
 performer_info = {performer['slug']: performer for performer in performer_data}
+logging.info(f"Created performer info dictionary with {len(performer_info)} entries.")
 
-# Controleer of het laden van de JSON correct was
-logging.info(f"Gegevens van {len(performer_info)} performers geladen.")
+# Define label_to_index
+logging.info("Creating label to index mapping...")
+labels = [performer['slug'] for performer in performer_data]
+label_to_index = {label: index for index, label in enumerate(np.unique(labels))}
+logging.info(f"Label to index mapping created with {len(label_to_index)} labels.")
 
 # Check if TensorFlow can detect the GPU and required libraries are available
 def check_gpu_availability():
+    logging.info("Checking GPU availability...")
     try:
         physical_devices = tf.config.list_physical_devices('GPU')
         if len(physical_devices) > 0:
@@ -75,21 +87,26 @@ gpu_available = check_gpu_availability()
 
 # Functie om te controleren of een afbeelding corrupt is
 def is_image_corrupt(path):
+    logging.info(f"Checking if image is corrupt: {path}")
     try:
         img = Image.open(path)
         img.verify()  # Verify that it is, in fact, an image
+        logging.info(f"Image is not corrupt: {path}")
         return False
     except (UnidentifiedImageError, IOError):
+        logging.error(f"Image is corrupt: {path}")
         return True
 
 # Functie om afbeelding veilig te laden
 def safe_load_img(path, target_size):
+    logging.info(f"Loading image safely: {path}")
     if is_image_corrupt(path):
         logging.error(f"Corrupt image file: {path}")
         # Return a blank image if loading failed
         return np.zeros((target_size[0], target_size[1], 3))
     try:
         img = load_img(path, target_size=target_size)
+        logging.info(f"Image loaded successfully: {path}")
         return img_to_array(img) / 255.0  # Normalize to 0-1
     except UnidentifiedImageError:
         logging.error(f"UnidentifiedImageError: cannot identify image file {path}")
@@ -98,6 +115,7 @@ def safe_load_img(path, target_size):
 
 # Create dataset with metadata
 def create_dataset_with_metadata_from_json(performer_info, output_path):
+    logging.info("Creating dataset with metadata from JSON...")
     data = []
     performer_found = 0
     total_files_found = 0
@@ -172,13 +190,20 @@ logging.info("Dataset loaded.")
 
 # Prepare the data for training using tf.data.Dataset
 def load_image_and_label(item):
+    logging.info(f"Loading image and label for item: {item['image_path']}")
     image = safe_load_img(item['image_path'], target_size=(224, 224))
     label = label_to_index[item['details']['slug']]
+    logging.info(f"Loaded image and label for item: {item['image_path']}")
     return image, label
 
 def data_generator(dataset):
-    for item in dataset:
+    logging.info("Starting data generator...")
+    for index, item in enumerate(dataset):
+        start_time = time.time()
+        logging.info(f"Processing item {index + 1}")
         yield load_image_and_label(item)
+        end_time = time.time()
+        logging.info(f"Processed item {index + 1} - Time taken: {end_time - start_time:.2f} seconds.")
 
 # Create a tf.data.Dataset from the generator
 logging.info("Creating tf.data.Dataset from generator...")
@@ -193,7 +218,8 @@ logging.info("tf.data.Dataset created.")
 
 # Split the dataset into training and validation sets
 logging.info("Splitting dataset into training and validation sets...")
-dataset_size = len(list(dataset))
+dataset_size = dataset.cardinality().numpy()
+logging.info(f"Dataset size: {dataset_size}")
 train_size = int(0.8 * dataset_size)
 val_size = dataset_size - train_size
 train_dataset = dataset.take(train_size)
@@ -229,12 +255,46 @@ logging.info("Model gecompileerd met optimizer 'adam' en loss 'sparse_categorica
 # Train het model
 logging.info("Start met trainen van het model...")
 try:
-    with tf.device('/GPU:0' if gpu_available else '/CPU:0'):
-        history = model.fit(
-            train_dataset,
-            epochs=MAX_EPOCHS,
-            validation_data=val_dataset
-        )
+    if gpu_available:
+        logging.info("Using GPU for training.")
+        with tf.device('/GPU:0'):
+            history = model.fit(
+                train_dataset,
+                epochs=MAX_EPOCHS,
+                validation_data=val_dataset,
+                callbacks=[
+                    tf.keras.callbacks.LambdaCallback(
+                        on_epoch_end=lambda epoch, logs: logging.info(
+                            f"Epoch {epoch+1}/{MAX_EPOCHS} - "
+                            f"Train loss: {logs['loss']:.4f}, "
+                            f"Train accuracy: {logs['accuracy']:.4f}, "
+                            f"Validation loss: {logs['val_loss']:.4f}, "
+                            f"Validation accuracy: {logs['val_accuracy']:.4f}"
+                        )
+                    )
+                ]
+            )
+            logging.info("Training completed successfully.")
+    else:
+        logging.info("Using CPU for training.")
+        with tf.device('/CPU:0'):
+            history = model.fit(
+                train_dataset,
+                epochs=MAX_EPOCHS,
+                validation_data=val_dataset,
+                callbacks=[
+                    tf.keras.callbacks.LambdaCallback(
+                        on_epoch_end=lambda epoch, logs: logging.info(
+                            f"Epoch {epoch+1}/{MAX_EPOCHS} - "
+                            f"Train loss: {logs['loss']:.4f}, "
+                            f"Train accuracy: {logs['accuracy']:.4f}, "
+                            f"Validation loss: {logs['val_loss']:.4f}, "
+                            f"Validation accuracy: {logs['val_accuracy']:.4f}"
+                        )
+                    )
+                ]
+            )
+            logging.info("Training completed successfully.")
 except Exception as e:
     logging.error(f"Error during model training: {e}")
     history = None
@@ -246,6 +306,8 @@ if history is not None:
         val_loss, val_acc = history.history['val_loss'][epoch], history.history['val_accuracy'][epoch]
         logging.info(f"Epoch {epoch+1} - Train loss: {train_loss:.4f}, Train accuracy: {train_acc:.4f}")
         logging.info(f"Epoch {epoch+1} - Validation loss: {val_loss:.4f}, Validation accuracy: {val_acc:.4f}")
+else:
+    logging.warning("Training history is None. No epochs to log.")
 
 # Sla het model op
 logging.info("Sla het model op...")
