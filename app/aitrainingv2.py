@@ -20,28 +20,29 @@ performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers
 output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
 
 # Zet de logging-configuratie op
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levellevel)s - %(message)s')
 
 # TensorFlow versie en GPU informatie
-print(f"tensorflow version: {tf.__version__}")
+logging.info(f"tensorflow version: {tf.__version__}")
 cuda_version = build.build_info.get('cuda_version', 'Not Available')
 cudnn_version = build.build_info.get('cudnn_version', 'Not Available')
-print(f"Cuda Version: {cuda_version}")
-print(f"Cudnn version: {cudnn_version}")
-print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+logging.info(f"Cuda Version: {cuda_version}")
+logging.info(f"Cudnn version: {cudnn_version}")
+logging.info("Num GPUs Available: %d", len(tf.config.list_physical_devices('GPU')))
 
 def count_performers_in_json(json_path):
     with open(json_path, 'r') as f:
         performer_data = json.load(f)
     return len(performer_data)
 
-print("total performers found in jsonfile " + str(count_performers_in_json(performer_data_path)))
+logging.info("Total performers found in JSON file: %d", count_performers_in_json(performer_data_path))
 
 def count_subfolders(path):
     subfolders = [name for name in os.listdir(path) if os.path.isdir(os.path.join(path, name))]
     return len(subfolders)
 
-print("total performers found subfolders " + str(count_subfolders(dataset_path)))
+logging.info("Total performers found in subfolders: %d", count_subfolders(dataset_path))
+
 # Laad performer data uit JSON
 with open(performer_data_path, 'r') as f:
     performer_data = json.load(f)
@@ -160,10 +161,14 @@ def create_dataset_with_metadata_from_json(performer_info, output_path):
     logging.info(f"Total images processed: {total_files_found}")
 
 # Create the dataset with metadata
+logging.info("Creating dataset with metadata...")
 create_dataset_with_metadata_from_json(performer_info, output_dataset_path)
+logging.info("Dataset creation complete.")
 
 # Load the dataset
+logging.info("Loading dataset...")
 dataset = np.load(output_dataset_path, allow_pickle=True)
+logging.info("Dataset loaded.")
 
 # Prepare the data for training using tf.data.Dataset
 def load_image_and_label(item):
@@ -176,6 +181,7 @@ def data_generator(dataset):
         yield load_image_and_label(item)
 
 # Create a tf.data.Dataset from the generator
+logging.info("Creating tf.data.Dataset from generator...")
 dataset = tf.data.Dataset.from_generator(
     lambda: data_generator(dataset),
     output_signature=(
@@ -183,17 +189,22 @@ dataset = tf.data.Dataset.from_generator(
         tf.TensorSpec(shape=(), dtype=tf.int32)
     )
 )
+logging.info("tf.data.Dataset created.")
 
 # Split the dataset into training and validation sets
+logging.info("Splitting dataset into training and validation sets...")
 dataset_size = len(list(dataset))
 train_size = int(0.8 * dataset_size)
 val_size = dataset_size - train_size
 train_dataset = dataset.take(train_size)
 val_dataset = dataset.skip(train_size)
+logging.info(f"Dataset split: {train_size} training samples, {val_size} validation samples.")
 
 # Batch and prefetch the datasets
+logging.info("Batching and prefetching datasets...")
 train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 val_dataset = val_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+logging.info("Datasets batched and prefetched.")
 
 # Laad VGG16 zonder de laatste lagen
 logging.info("Laad VGG16 model zonder top lagen...")
@@ -210,6 +221,7 @@ model = models.Sequential([
     layers.Dropout(0.5),
     layers.Dense(len(label_to_index), activation='softmax')  # Aantal performers
 ])
+logging.info("Aangepaste model gebouwd.")
 
 model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 logging.info("Model gecompileerd met optimizer 'adam' en loss 'sparse_categorical_crossentropy'.")
@@ -242,6 +254,7 @@ logging.info("Model opgeslagen als performer_recognition_model.keras")
 
 # Functie om voorspellingen te doen
 def predict_performer(image_path):
+    logging.info(f"Predicting performer for image: {image_path}")
     img = safe_load_img(image_path, target_size=(224, 224))  # Laad en verwerk de afbeelding
     prediction = model.predict(np.expand_dims(img, axis=0))  # Voorspel de performer
     
