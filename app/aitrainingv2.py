@@ -12,6 +12,8 @@ from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from PIL import UnidentifiedImageError, Image
 from tensorflow.python.platform import build_info as build
 import time
+from tqdm import tqdm  # Add tqdm for progress bar
+import psutil  # Add psutil for memory monitoring
 
 # Instellingen
 MAX_EPOCHS = 20
@@ -87,26 +89,21 @@ gpu_available = check_gpu_availability()
 
 # Functie om te controleren of een afbeelding corrupt is
 def is_image_corrupt(path):
-    logging.info(f"Checking if image is corrupt: {path}")
     try:
         img = Image.open(path)
         img.verify()  # Verify that it is, in fact, an image
-        logging.info(f"Image is not corrupt: {path}")
         return False
     except (UnidentifiedImageError, IOError):
-        logging.error(f"Image is corrupt: {path}")
         return True
 
 # Functie om afbeelding veilig te laden
 def safe_load_img(path, target_size):
-    logging.info(f"Loading image safely: {path}")
     if is_image_corrupt(path):
         logging.error(f"Corrupt image file: {path}")
         # Return a blank image if loading failed
         return np.zeros((target_size[0], target_size[1], 3))
     try:
         img = load_img(path, target_size=target_size)
-        logging.info(f"Image loaded successfully: {path}")
         return img_to_array(img) / 255.0  # Normalize to 0-1
     except UnidentifiedImageError:
         logging.error(f"UnidentifiedImageError: cannot identify image file {path}")
@@ -117,83 +114,88 @@ def safe_load_img(path, target_size):
 def create_dataset_with_metadata_from_json(performer_info, output_path):
     logging.info("Creating dataset with metadata from JSON...")
     data = []
-    performer_found = 0
     total_files_found = 0
-    total_performers = len(performer_info)
+    total_images = sum(len(performer['image_urls']) for performer in performer_info.values())
     
-    for performer in performer_info.values():
-        performer_found += 1
-        performer_images_found = 0
-        total_images = len(performer['image_urls'])
-        logging.info(f"Processing performer {performer_found}/{total_performers}: {performer['name']} with {total_images} images")
-        
-        for image_path in performer['image_urls']:
-            performer_images_found += 1
-            total_files_found += 1
-            logging.info(f"Processing image {performer_images_found}/{total_images} for performer {performer_found}/{total_performers}")
-            
-            if os.path.isfile(image_path):
-                data.append({
-                    'image_path': image_path,
-                    'details': {
-                        'id': performer.get('id', None),
-                        'slug': performer.get('slug', None),
-                        'name': performer.get('name', None),
-                        'bio': performer.get('bio', None),
-                        'rating': performer.get('rating', None),
-                        'is_parent': performer.get('is_parent', None),
-                        'gender': performer.get('gender', None),
-                        'birthday': performer.get('birthday', None),
-                        'deathday': performer.get('deathday', None),
-                        'birthplace': performer.get('birthplace', None),
-                        'ethnicity': performer.get('ethnicity', None),
-                        'nationality': performer.get('nationality', None),
-                        'hair_color': performer.get('hair_color', None),
-                        'eye_color': performer.get('eye_color', None),
-                        'height': performer.get('height', None),
-                        'weight': performer.get('weight', None),
-                        'measurements': performer.get('measurements', None),
-                        'waist_size': performer.get('waist_size', None),
-                        'hip_size': performer.get('hip_size', None),
-                        'cup_size': performer.get('cup_size', None),
-                        'tattoos': performer.get('tattoos', None),
-                        'piercings': performer.get('piercings', None),
-                        'fake_boobs': performer.get('fake_boobs', None),
-                        'same_sex_only': performer.get('same_sex_only', None),
-                        'career_start_year': performer.get('career_start_year', None),
-                        'career_end_year': performer.get('career_end_year', None),
-                        'image_urls': performer.get('image_urls', None),
-                        'image_amount': performer.get('image_amount', None),
-                        'page': performer.get('page', None),
-                        'performer_number': performer.get('performer_number', None),
-                        'image_folder': performer.get('image_folder', None)  # Added field
-                    }
-                })
-            else:
-                logging.warning(f"Image file not found: {image_path}")
+    with tqdm(total=total_images, desc="Processing images") as pbar:
+        for performer in performer_info.values():
+            for image_path in performer['image_urls']:
+                total_files_found += 1
+                
+                if os.path.isfile(image_path):
+                    data.append({
+                        'image_path': image_path,
+                        'details': {
+                            'id': performer.get('id', None),
+                            'slug': performer.get('slug', None),
+                            'name': performer.get('name', None),
+                            'bio': performer.get('bio', None),
+                            'rating': performer.get('rating', None),
+                            'is_parent': performer.get('is_parent', None),
+                            'gender': performer.get('gender', None),
+                            'birthday': performer.get('birthday', None),
+                            'deathday': performer.get('deathday', None),
+                            'birthplace': performer.get('birthplace', None),
+                            'ethnicity': performer.get('ethnicity', None),
+                            'nationality': performer.get('nationality', None),
+                            'hair_color': performer.get('hair_color', None),
+                            'eye_color': performer.get('eye_color', None),
+                            'height': performer.get('height', None),
+                            'weight': performer.get('weight', None),
+                            'measurements': performer.get('measurements', None),
+                            'waist_size': performer.get('waist_size', None),
+                            'hip_size': performer.get('hip_size', None),
+                            'cup_size': performer.get('cup_size', None),
+                            'tattoos': performer.get('tattoos', None),
+                            'piercings': performer.get('piercings', None),
+                            'fake_boobs': performer.get('fake_boobs', None),
+                            'same_sex_only': performer.get('same_sex_only', None),
+                            'career_start_year': performer.get('career_start_year', None),
+                            'career_end_year': performer.get('career_end_year', None),
+                            'image_urls': performer.get('image_urls', None),
+                            'image_amount': performer.get('image_amount', None),
+                            'page': performer.get('page', None),
+                            'performer_number': performer.get('performer_number', None),
+                            'image_folder': performer.get('image_folder', None)  # Added field
+                        }
+                    })
+                else:
+                    logging.warning(f"Image file not found: {image_path}")
+                
+                pbar.update(1)
     
     logging.info("Finished processing all performers and images.")
     np.save(output_path, data)
     logging.info(f"Dataset with metadata saved to {output_path}")
-    logging.info(f"Total performers processed: {performer_found}")
     logging.info(f"Total images processed: {total_files_found}")
+
+# Monitor memory usage
+def log_memory_usage():
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    logging.info(f"Memory usage: RSS={mem_info.rss / (1024 ** 2):.2f} MB, VMS={mem_info.vms / (1024 ** 2):.2f} MB")
 
 # Create the dataset with metadata
 logging.info("Creating dataset with metadata...")
+start_time = time.time()  # Start timing
 create_dataset_with_metadata_from_json(performer_info, output_dataset_path)
-logging.info("Dataset creation complete.")
-
-# Prepare the data for training using tf.data.Dataset
-def load_image_and_label(image_path, label):
-    logging.info(f"Loading image and label for item: {image_path.numpy().decode('utf-8')}")
-    image = safe_load_img(image_path.numpy().decode('utf-8'), target_size=(224, 224))
-    logging.info(f"Loaded image and label for item: {image_path.numpy().decode('utf-8')}")
-    return image, label
+end_time = time.time()  # End timing
+logging.info(f"Dataset creation complete. Time taken: {end_time - start_time:.2f} seconds")
 
 # Load the dataset
 logging.info("Loading dataset...")
 dataset = np.load(output_dataset_path, allow_pickle=True)
 logging.info("Dataset loaded.")
+
+# Prepare the data for training using tf.data.Dataset
+def load_image_and_label(image_path, label):
+    try:
+        image = safe_load_img(image_path.numpy().decode('utf-8'), target_size=(224, 224))
+    except Exception as e:
+        logging.error(f"Error loading image and label: {e}")
+        image = np.zeros((224, 224, 3))
+        label = -1
+    return image, label
 
 # Create a list of image paths and labels
 image_paths = [item['image_path'] for item in dataset]
@@ -215,10 +217,13 @@ def map_fn_with_counter(image_path, label):
     image = tf.ensure_shape(image, (224, 224, 3))
     label = tf.ensure_shape(label, ())
     processed_images += 1
-    logging.info(f"Processed {processed_images}/{total_images} images")
+    pbar.update(1)  # Update the progress bar
     return image, label
 
-dataset = dataset.map(map_fn_with_counter, num_parallel_calls=tf.data.AUTOTUNE)
+# Apply parallel mapping and prefetching
+with tqdm(total=total_images, desc="Loading images") as pbar:
+    dataset = dataset.map(map_fn_with_counter, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
 
 logging.info("tf.data.Dataset created.")
 
@@ -264,43 +269,57 @@ try:
     if gpu_available:
         logging.info("Using GPU for training.")
         with tf.device('/GPU:0'):
-            history = model.fit(
-                train_dataset,
-                epochs=MAX_EPOCHS,
-                validation_data=val_dataset,
-                callbacks=[
-                    tf.keras.callbacks.LambdaCallback(
-                        on_epoch_end=lambda epoch, logs: logging.info(
-                            f"Epoch {epoch+1}/{MAX_EPOCHS} - "
-                            f"Train loss: {logs['loss']:.4f}, "
-                            f"Train accuracy: {logs['accuracy']:.4f}, "
-                            f"Validation loss: {logs['val_loss']:.4f}, "
-                            f"Validation accuracy: {logs['val_accuracy']:.4f}"
+            with tqdm(total=total_images, desc="Processing images") as pbar:
+                history = model.fit(
+                    train_dataset,
+                    epochs=MAX_EPOCHS,
+                    validation_data=val_dataset,
+                    callbacks=[
+                        tf.keras.callbacks.LambdaCallback(
+                            on_epoch_end=lambda epoch, logs: logging.info(
+                                f"Epoch {epoch+1}/{MAX_EPOCHS} - "
+                                f"Train loss: {logs['loss']:.4f}, "
+                                f"Train accuracy: {logs['accuracy']:.4f}, "
+                                f"Validation loss: {logs['val_loss']:.4f}, "
+                                f"Validation accuracy: {logs['val_accuracy']:.4f}"
+                            )
+                        ),
+                        tf.keras.callbacks.LambdaCallback(
+                            on_epoch_end=lambda epoch, logs: log_memory_usage()
+                        ),
+                        tf.keras.callbacks.LambdaCallback(
+                            on_batch_end=lambda batch, logs: pbar.update(BATCH_SIZE)
                         )
-                    )
-                ]
-            )
-            logging.info("Training completed successfully.")
+                    ]
+                )
+                logging.info("Training completed successfully.")
     else:
         logging.info("Using CPU for training.")
         with tf.device('/CPU:0'):
-            history = model.fit(
-                train_dataset,
-                epochs=MAX_EPOCHS,
-                validation_data=val_dataset,
-                callbacks=[
-                    tf.keras.callbacks.LambdaCallback(
-                        on_epoch_end=lambda epoch, logs: logging.info(
-                            f"Epoch {epoch+1}/{MAX_EPOCHS} - "
-                            f"Train loss: {logs['loss']:.4f}, "
-                            f"Train accuracy: {logs['accuracy']:.4f}, "
-                            f"Validation loss: {logs['val_loss']:.4f}, "
-                            f"Validation accuracy: {logs['val_accuracy']:.4f}"
+            with tqdm(total=total_images, desc="Processing images") as pbar:
+                history = model.fit(
+                    train_dataset,
+                    epochs=MAX_EPOCHS,
+                    validation_data=val_dataset,
+                    callbacks=[
+                        tf.keras.callbacks.LambdaCallback(
+                            on_epoch_end=lambda epoch, logs: logging.info(
+                                f"Epoch {epoch+1}/{MAX_EPOCHS} - "
+                                f"Train loss: {logs['loss']:.4f}, "
+                                f"Train accuracy: {logs['accuracy']:.4f}, "
+                                f"Validation loss: {logs['val_loss']:.4f}, "
+                                f"Validation accuracy: {logs['val_accuracy']:.4f}"
+                            )
+                        ),
+                        tf.keras.callbacks.LambdaCallback(
+                            on_epoch_end=lambda epoch, logs: log_memory_usage()
+                        ),
+                        tf.keras.callbacks.LambdaCallback(
+                            on_batch_end=lambda batch, logs: pbar.update(BATCH_SIZE)
                         )
-                    )
-                ]
-            )
-            logging.info("Training completed successfully.")
+                    ]
+                )
+                logging.info("Training completed successfully.")
 except Exception as e:
     logging.error(f"Error during model training: {e}")
     history = None
