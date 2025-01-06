@@ -224,6 +224,7 @@ def map_fn_with_counter(image_path, label):
 with tqdm(total=total_images, desc="Loading images") as pbar:
     dataset = dataset.map(map_fn_with_counter, num_parallel_calls=tf.data.AUTOTUNE)
     dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+    pbar.close()  # Ensure the progress bar is closed after processing
 
 logging.info("tf.data.Dataset created.")
 
