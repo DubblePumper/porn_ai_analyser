@@ -5,6 +5,7 @@ import numpy as np
 import tensorflow as tf
 import json
 import logging
+from transformers import TFViTForImageClassification, ViTFeatureExtractor
 from tensorflow import keras
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras import layers, models
@@ -14,6 +15,8 @@ from tensorflow.python.platform import build_info as build
 import time
 from tqdm import tqdm  # Add tqdm for progress bar
 import psutil  # Add psutil for memory monitoring
+import signal  # Add signal for timeout handling
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 # Instellingen
 MAX_EPOCHS = 20
@@ -75,8 +78,9 @@ def check_gpu_availability():
     try:
         physical_devices = tf.config.list_physical_devices('GPU')
         if len(physical_devices) > 0:
-            tf.config.experimental.set_memory_growth(physical_devices[0], True)
-            logging.info(f"GPU found: {physical_devices[0].name}")
+            for device in physical_devices:
+                tf.config.experimental.set_memory_growth(device, True)
+            logging.info(f"GPUs found: {[device.name for device in physical_devices]}")
             return True
         else:
             logging.warning("No GPU found. Using CPU instead.")
@@ -96,19 +100,41 @@ def is_image_corrupt(path):
     except (UnidentifiedImageError, IOError):
         return True
 
-# Functie om afbeelding veilig te laden
+# Timeout handler
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException
+
+
+# Functie om afbeelding veilig te laden met timeout
+def safe_load_img_with_timeout(path, target_size, timeout=5):
+    def load_image():
+        if is_image_corrupt(path):
+            logging.error(f"Corrupt image file: {path}")
+            return np.zeros((target_size[0], target_size[1], 3))
+        try:
+            img = load_img(path, target_size=target_size)
+            return img_to_array(img) / 255.0  # Normalize to 0-1
+        except UnidentifiedImageError:
+            logging.error(f"UnidentifiedImageError: cannot identify image file {path}")
+            return np.zeros((target_size[0], target_size[1], 3))
+        except Exception as e:
+            logging.error(f"Error loading image file {path}: {e}")
+            return np.zeros((target_size[0], target_size[1], 3))
+
+    with ThreadPoolExecutor() as executor:
+        future = executor.submit(load_image)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            logging.error(f"Timeout while loading image file: {path}")
+            return np.zeros((target_size[0], target_size[1], 3))
+
+# Update the safe_load_img function to use the new timeout mechanism
 def safe_load_img(path, target_size):
-    if is_image_corrupt(path):
-        logging.error(f"Corrupt image file: {path}")
-        # Return a blank image if loading failed
-        return np.zeros((target_size[0], target_size[1], 3))
-    try:
-        img = load_img(path, target_size=target_size)
-        return img_to_array(img) / 255.0  # Normalize to 0-1
-    except UnidentifiedImageError:
-        logging.error(f"UnidentifiedImageError: cannot identify image file {path}")
-        # Return a blank image if loading failed
-        return np.zeros((target_size[0], target_size[1], 3))
+    return safe_load_img_with_timeout(path, target_size)
 
 # Create dataset with metadata
 def create_dataset_with_metadata_from_json(performer_info, output_path):
@@ -119,10 +145,10 @@ def create_dataset_with_metadata_from_json(performer_info, output_path):
     
     with tqdm(total=total_images, desc="Processing images") as pbar:
         for performer in performer_info.values():
+            valid_image_urls = []
             for image_path in performer['image_urls']:
-                total_files_found += 1
-                
                 if os.path.isfile(image_path):
+                    valid_image_urls.append(image_path)
                     data.append({
                         'image_path': image_path,
                         'details': {
@@ -163,6 +189,7 @@ def create_dataset_with_metadata_from_json(performer_info, output_path):
                     logging.warning(f"Image file not found: {image_path}")
                 
                 pbar.update(1)
+            performer['image_urls'] = valid_image_urls  # Update with valid image URLs only
     
     logging.info("Finished processing all performers and images.")
     np.save(output_path, data)
@@ -201,9 +228,25 @@ def load_image_and_label(image_path, label):
 image_paths = [item['image_path'] for item in dataset]
 labels = [label_to_index[item['details']['slug']] for item in dataset]
 
-# Create a tf.data.Dataset from the image paths and labels
-logging.info("Creating tf.data.Dataset from image paths and labels...")
-dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
+# Ensure proper labeling by checking the labels and image paths
+def verify_labels_and_images(image_paths, labels):
+    for image_path, label in zip(image_paths, labels):
+        if not os.path.isfile(image_path):
+            logging.error(f"Image file not found: {image_path}")
+        if label not in label_to_index.values():
+            logging.error(f"Invalid label: {label}")
+
+verify_labels_and_images(image_paths, labels)
+
+# Apply batching early
+def create_batched_dataset(image_paths, labels, batch_size):
+    dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
+    dataset = dataset.batch(batch_size)
+    return dataset
+
+# Create a batched tf.data.Dataset from the image paths and labels
+logging.info("Creating batched tf.data.Dataset from image paths and labels...")
+dataset = create_batched_dataset(image_paths, labels, BATCH_SIZE)
 
 # Add image counter
 total_images = len(image_paths)
@@ -211,14 +254,18 @@ processed_images = 0
 
 def map_fn_with_counter(image_path, label):
     global processed_images
-    image, label = tf.py_function(
-        func=load_image_and_label, inp=[image_path, label], Tout=(tf.float32, tf.int32)
-    )
-    image = tf.ensure_shape(image, (224, 224, 3))
-    label = tf.ensure_shape(label, ())
-    processed_images += 1
-    pbar.update(1)  # Update the progress bar
-    return image, label
+    try:
+        image, label = tf.py_function(
+            func=load_image_and_label, inp=[image_path, label], Tout=(tf.float32, tf.int32)
+        )
+        image = tf.ensure_shape(image, (224, 224, 3))
+        label = tf.ensure_shape(label, ())
+        processed_images += 1
+        pbar.update(1)  # Update the progress bar
+        return image, label
+    except Exception as e:
+        logging.error(f"Error in map_fn_with_counter: {e}")
+        return tf.zeros((224, 224, 3), dtype=tf.float32), tf.constant(-1, dtype=tf.int32)
 
 # Apply parallel mapping and prefetching
 with tqdm(total=total_images, desc="Loading images") as pbar:
@@ -244,28 +291,48 @@ train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 val_dataset = val_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 logging.info("Datasets batched and prefetched.")
 
-# Laad VGG16 zonder de laatste lagen
-logging.info("Laad VGG16 model zonder top lagen...")
-base_model = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+# Laad Vision Transformer (ViT) zonder de laatste lagen
+logging.info("Laad Vision Transformer (ViT) model zonder top lagen...")
+base_model = TFViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
+feature_extractor = ViTFeatureExtractor.from_pretrained("google/vit-base-patch16-224")
 base_model.trainable = False  # Bevries de convolutionele lagen
-logging.info("VGG16 model geladen en de convolutionele lagen bevroren.")
+logging.info("Vision Transformer (ViT) model geladen en de convolutionele lagen bevroren.")
+
+# Data Augmentation
+data_augmentation = keras.Sequential(
+    [
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.2),
+        layers.RandomZoom(0.2),
+    ]
+)
 
 # Bouw het aangepaste model
-logging.info("Bouwen van het aangepaste model...")
+logging.info("Bouwen van het verbeterde model met Vision Transformer...")
 model = models.Sequential([
+    data_augmentation,
     base_model,
-    layers.Flatten(),
+    layers.GlobalAveragePooling2D(),
+    layers.Dense(512, activation='relu'),
+    layers.Dropout(0.5),
     layers.Dense(256, activation='relu'),
     layers.Dropout(0.5),
     layers.Dense(len(label_to_index), activation='softmax')  # Aantal performers
 ])
-logging.info("Aangepaste model gebouwd.")
+logging.info("Verbeterde model gebouwd met Vision Transformer.")
 
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-logging.info("Model gecompileerd met optimizer 'adam' en loss 'sparse_categorical_crossentropy'.")
+# Adjust the learning rate and compile the model
+logging.info("Model gecompileerd met optimizer 'adam' en aangepaste learning rate.")
+model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001), 
+              loss='sparse_categorical_crossentropy', 
+              metrics=['accuracy'])
 
-# Train het model
-logging.info("Start met trainen van het model...")
+# Class weights to handle class imbalance
+class_weights = {i: 1.0 for i in range(len(label_to_index))}
+# Optionally, adjust weights based on class distribution
+
+# Train het model met class weights
+logging.info("Start met trainen van het model met class weights...")
 try:
     if gpu_available:
         logging.info("Using GPU for training.")
@@ -275,6 +342,7 @@ try:
                     train_dataset,
                     epochs=MAX_EPOCHS,
                     validation_data=val_dataset,
+                    class_weight=class_weights,
                     callbacks=[
                         tf.keras.callbacks.LambdaCallback(
                             on_epoch_end=lambda epoch, logs: logging.info(
@@ -293,6 +361,7 @@ try:
                         )
                     ]
                 )
+                pbar.close()  # Ensure the progress bar is closed after processing
                 logging.info("Training completed successfully.")
     else:
         logging.info("Using CPU for training.")
@@ -302,6 +371,7 @@ try:
                     train_dataset,
                     epochs=MAX_EPOCHS,
                     validation_data=val_dataset,
+                    class_weight=class_weights,
                     callbacks=[
                         tf.keras.callbacks.LambdaCallback(
                             on_epoch_end=lambda epoch, logs: logging.info(
@@ -320,6 +390,7 @@ try:
                         )
                     ]
                 )
+                pbar.close()  # Ensure the progress bar is closed after processing
                 logging.info("Training completed successfully.")
 except Exception as e:
     logging.error(f"Error during model training: {e}")
@@ -340,11 +411,17 @@ logging.info("Sla het model op...")
 model.save('performer_recognition_model.keras')  # Sla het getrainde model op als een bestand
 logging.info("Model opgeslagen als performer_recognition_model.keras")
 
+# Evaluate the model after training
+logging.info("Evaluating the model...")
+evaluation = model.evaluate(val_dataset)
+logging.info(f"Validation loss: {evaluation[0]:.4f}, Validation accuracy: {evaluation[1]:.4f}")
+
 # Functie om voorspellingen te doen
 def predict_performer(image_path):
     logging.info(f"Predicting performer for image: {image_path}")
     img = safe_load_img(image_path, target_size=(224, 224))  # Laad en verwerk de afbeelding
-    prediction = model.predict(np.expand_dims(img, axis=0))  # Voorspel de performer
+    inputs = feature_extractor(images=img, return_tensors="tf")
+    prediction = model.predict(inputs['pixel_values'])  # Voorspel de performer
     
     # Verkrijg de index van de voorspelling
     predicted_class_index = np.argmax(prediction)
