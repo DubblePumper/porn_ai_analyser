@@ -4,3 +4,4 @@
 /app/.env
 performer_recognition_model.keras
 /app/datasets/performer_images_with_metadata.npy
+/performer_recognition_model/
