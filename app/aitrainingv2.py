@@ -10,6 +10,7 @@ from transformers import TFViTForImageClassification, ViTImageProcessor
 from tensorflow import keras
 from tensorflow.keras import layers, models
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.data.experimental import cardinality
 from PIL import UnidentifiedImageError, Image
 from tensorflow.python.platform import build_info as build
 import time
@@ -114,7 +115,7 @@ def safe_load_img_with_timeout(path, target_size, timeout=5):
                 img_array = np.resize(img_array, (224, 224, 3))
             return img_array
         except UnidentifiedImageError:
-            return np.zeros((target_size[0], target_size[1], 3))
+            return np.zeros((target_size[0], 224, 3))
         except Exception as e:
             return np.zeros((target_size[0], target_size[1], 3))
 
@@ -135,7 +136,7 @@ def safe_load_img(path, target_size):
 
 
 # Create dataset with metadata
-def create_dataset_with_metadata_from_json(performer_info, output_path):
+def create_dataset_with_basic_info(performer_info, output_path):
     data = []
     total_images = sum(len(performer['image_urls']) for performer in performer_info.values())
 
@@ -147,50 +148,18 @@ def create_dataset_with_metadata_from_json(performer_info, output_path):
                     valid_image_urls.append(image_path)
                     data.append({
                         'image_path': image_path,
-                        'details': {
-                            'id': performer.get('id', None),
-                            'slug': performer.get('slug', None),
-                            'name': performer.get('name', None),
-                            'bio': performer.get('bio', None),
-                            'rating': performer.get('rating', None),
-                            'is_parent': performer.get('is_parent', None),
-                            'gender': performer.get('gender', None),
-                            'birthday': performer.get('birthday', None),
-                            'deathday': performer.get('deathday', None),
-                            'birthplace': performer.get('birthplace', None),
-                            'ethnicity': performer.get('ethnicity', None),
-                            'nationality': performer.get('nationality', None),
-                            'hair_color': performer.get('hair_color', None),
-                            'eye_color': performer.get('eye_color', None),
-                            'height': performer.get('height', None),
-                            'weight': performer.get('weight', None),
-                            'measurements': performer.get('measurements', None),
-                            'waist_size': performer.get('waist_size', None),
-                            'hip_size': performer.get('hip_size', None),
-                            'cup_size': performer.get('cup_size', None),
-                            'tattoos': performer.get('tattoos', None),
-                            'piercings': performer.get('piercings', None),
-                            'fake_boobs': performer.get('fake_boobs', None),
-                            'same_sex_only': performer.get('same_sex_only', None),
-                            'career_start_year': performer.get('career_start_year', None),
-                            'career_end_year': performer.get('career_end_year', None),
-                            'image_urls': performer.get('image_urls', None),
-                            'image_amount': performer.get('image_amount', None),
-                            'page': performer.get('page', None),
-                            'performer_number': performer.get('performer_number', None),
-                            'image_folder': performer.get('image_folder', None)  # Added field
-                        }
+                        'id': performer.get('id', None),
+                        'name': performer.get('name', None)
                     })
                 pbar.update(1)
             performer['image_urls'] = valid_image_urls  # Update with valid image URLs only
 
     np.save(output_path, data)
 
-
-# Create the dataset with metadata
+# Create the dataset with basic info
 start_time = time.time()  # Start timing
-logging.info("Starting dataset creation with metadata.")
-create_dataset_with_metadata_from_json(performer_info, output_dataset_path)
+logging.info("Starting dataset creation with basic info.")
+create_dataset_with_basic_info(performer_info, output_dataset_path)
 end_time = time.time()  # End timing
 logging.info(f"Dataset creation complete. Time taken: {end_time - start_time:.2f} seconds")
 
@@ -199,8 +168,37 @@ logging.info("Loading the dataset.")
 dataset = np.load(output_dataset_path, allow_pickle=True)
 logging.info(f"Dataset loaded. Total items: {len(dataset)}")
 
+# Create a mapping from performer IDs to integer labels
+performer_ids = [performer['id'] for performer in performer_data]
+id_to_index = {id: index for index, id in enumerate(np.unique(performer_ids))}
 
-# Prepare the data for training using tf.data.Dataset
+# Create a list of image paths and labels
+image_paths = [item['image_path'] for item in dataset]
+labels = [id_to_index[item['id']] for item in dataset if item['id'] in id_to_index]
+
+# Ensure proper labeling by checking the labels and image paths
+def verify_labels_and_images(image_paths, labels, description):
+    valid_image_paths = []
+    valid_labels = []
+
+    with tqdm(total=len(image_paths), desc=description) as pbar:
+        for image_path, label in zip(image_paths, labels):
+            if os.path.isfile(image_path) and not is_image_corrupt(image_path) and 0 <= label < len(label_to_index):
+                valid_image_paths.append(image_path)
+                valid_labels.append(label)
+            pbar.update(1)
+
+    return valid_image_paths, valid_labels
+
+logging.info("Verifying labels and images.")
+image_paths, labels = verify_labels_and_images(image_paths, labels, "Verifying labels and images")
+logging.info(f"Verification complete. Valid images: {len(image_paths)}")
+
+# Add image counter
+total_images = len(image_paths)
+processed_images = 0
+
+# Function to load image and label
 def load_image_and_label(image_path, label):
     def _load_image_and_label(image_path, label):
         try:
@@ -214,10 +212,6 @@ def load_image_and_label(image_path, label):
             if image.shape != (224, 224, 3):
                 raise ValueError("Image shape mismatch")
 
-            # Validate label
-            if not (0 <= label < len(label_to_index)):
-                raise ValueError(f"Invalid label: {label}")
-
             return image, label
 
         except Exception as e:
@@ -227,34 +221,6 @@ def load_image_and_label(image_path, label):
     image.set_shape((224, 224, 3))
     label.set_shape(())
     return image, label
-
-
-# Create a list of image paths and labels
-image_paths = [item['image_path'] for item in dataset]
-labels = [label_to_index[item['details']['slug']] for item in dataset if item['details']['slug'] in label_to_index]
-
-
-# Ensure proper labeling by checking the labels and image paths
-def verify_labels_and_images(image_paths, labels):
-    valid_image_paths = []
-    valid_labels = []
-
-    for image_path, label in zip(image_paths, labels):
-        if os.path.isfile(image_path) and not is_image_corrupt(image_path) and 0 <= label < len(label_to_index):
-            valid_image_paths.append(image_path)
-            valid_labels.append(label)
-
-    return valid_image_paths, valid_labels
-
-
-logging.info("Verifying labels and images.")
-image_paths, labels = verify_labels_and_images(image_paths, labels)
-logging.info(f"Verification complete. Valid images: {len(image_paths)}")
-
-# Add image counter
-total_images = len(image_paths)
-processed_images = 0
-
 
 # Simplified map function for clarity
 def map_fn_with_counter(image_path, label):
@@ -282,6 +248,9 @@ def map_fn_with_counter(image_path, label):
 
 # Apply batching early
 def create_batched_dataset(image_paths, labels, batch_size):
+    global dataset_size  # Declare the global variable
+    dataset_size = 151393
+
     # Create a TensorFlow Dataset with image paths and labels
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
 
@@ -293,16 +262,21 @@ def create_batched_dataset(image_paths, labels, batch_size):
     dataset = dataset.filter(lambda image, label: tf.reduce_all(label >= 0))  # Filter out invalid labels
     # Apply batch and prefetch for performance
     dataset = dataset.batch(BATCH_SIZE).prefetch(buffer_size=tf.data.AUTOTUNE)
+    dataset = dataset.map(lambda image, label: (tf.ensure_shape(image, [None, 224, 224, 3]), tf.ensure_shape(label, [None])), num_parallel_calls=tf.data.AUTOTUNE)
+    
+    # Set the shape and name for the dataset elements
+    dataset = dataset.map(lambda image, label: (tf.identity(image, name="image"), tf.identity(label, name="label")), num_parallel_calls=tf.data.AUTOTUNE)
+    
     return dataset
 
 # Create a batched tf.data.Dataset from the image paths and labels
 logging.info("Creating batched dataset.")
 dataset = create_batched_dataset(image_paths, labels, BATCH_SIZE)
-logging.info("Batched dataset created.")
 
 # Verify the dataset after filtering
 for image, label in dataset.take(5):
-    pass
+    image.set_shape([None, 224, 224, 3])
+    label.set_shape([None])
 
 # Apply parallel mapping and prefetching
 logging.info("Applying parallel mapping and prefetching.")
@@ -319,24 +293,33 @@ with tqdm(total=total_images, desc="Loading images") as pbar:
 logging.info("Parallel mapping and prefetching complete.")
 
 # Split the dataset into training and validation sets
+logging.info("Splitting the dataset into training and validation sets.")
 dataset_size = len(image_paths)
 train_size = int(0.8 * dataset_size)
 val_size = dataset_size - train_size
 train_dataset = dataset.take(train_size)
 val_dataset = dataset.skip(train_size)
+logging.info(f"Dataset split complete. Training size: {train_size}, Validation size: {val_size}")
 
 # Batch and prefetch the datasets
+logging.info("Batching and prefetching the datasets.")
 train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 val_dataset = val_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+logging.info("Batching and prefetching complete.")
 
+logging.info("Loading the base model and feature extractor.")
 base_model = TFViTForImageClassification.from_pretrained("google/vit-base-patch16-224", from_pt=True)
 feature_extractor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224")
+logging.info("Base model and feature extractor loaded.")
 
 # Bevries alle lagen behalve de top lagen
+logging.info("Freezing all layers except the top layers.")
 for layer in base_model.vit.encoder.layer[:-1]:  # Bevries alle lagen behalve de laatste encoderlaag
     layer.trainable = False
+logging.info("Layers frozen.")
 
 # Data Augmentation
+logging.info("Setting up data augmentation.")
 data_augmentation = keras.Sequential(
     [
         layers.RandomFlip("horizontal_and_vertical"),
@@ -344,8 +327,10 @@ data_augmentation = keras.Sequential(
         layers.RandomZoom(0.2),
     ]
 )
+logging.info("Data augmentation setup complete.")
 
 # Bouw het aangepaste model
+logging.info("Building the custom model.")
 model = models.Sequential([
     data_augmentation,
     layers.Input(shape=(224, 224, 3)),  # Ensure the input shape is correct
@@ -356,30 +341,56 @@ model = models.Sequential([
     layers.Dropout(0.5),
     layers.Dense(256, activation='relu'),
     layers.Dropout(0.5),
-    layers.Dense(len(label_to_index), activation='softmax')  # Aantal performers
+    layers.Dense(len(id_to_index), activation='softmax')  # Number of performers
 ])
+logging.info("Custom model built.")
 
 # Adjust the learning rate and compile the model
+logging.info("Compiling the model.")
 model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
               loss='sparse_categorical_crossentropy',
               metrics=['accuracy'])
+logging.info("Model compilation complete.")
 
 # Class weights to handle class imbalance
-class_weights = {i: 1.0 for i in range(len(label_to_index))}
+class_weights = {i: 1.0 for i in range(len(id_to_index))}
 # Optionally, adjust weights based on class distribution
 
+def calculate_total_elements(dataset, description):
+
+    logging.info("Calculating total elements in the dataset......")
+    total_elements = dataset_size 
+    return total_elements
+
+
 # Ensure labels are properly formatted
-def ensure_labels_format(dataset):
-    for image, label in dataset.take(1):
-        if label.shape.rank is None:
-            raise ValueError("Label shape is None. Please check the dataset and labels.")
-        if label.shape.rank > 2:
-            raise ValueError("Label shape rank is greater than 2. Please check the dataset and labels.")
+def ensure_labels_format(dataset, description):
+    total_elements = calculate_total_elements(dataset, description)
+    
+    logging.info(f"Total elements calculated - {total_elements}. Ensuring labels are properly formatted.")
 
-ensure_labels_format(train_dataset)
-ensure_labels_format(val_dataset)
+    def check_image_and_label(image, label):
+        logging.debug(f"Checking image and label: {image.shape}, {label.shape}")
+        tf.debugging.assert_equal(tf.rank(label), 0, message="Label shape is incorrect")
+        return image, label
 
-# Train het model met class weights
+    dataset = dataset.map(check_image_and_label, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+    processed_count = 0
+    with tqdm(total=total_elements, desc=description) as pbar:
+        for _ in dataset:
+            pbar.update(1)
+            processed_count += 1
+            if processed_count % 1000 == 0:
+                logging.info(f"Processed {processed_count} elements")
+        pbar.close()  # Ensure the progress bar is closed after processing
+
+logging.info("Ensuring labels are properly formatted.")
+ensure_labels_format(train_dataset.concatenate(val_dataset), "Verifying dataset labels")
+logging.info("Label format verification complete.")
+
+# Train the model with class weights
 try:
     logging.info("Starting model training.")
     if gpu_available:
