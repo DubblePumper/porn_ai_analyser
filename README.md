@@ -3,8 +3,8 @@ An AI-powered video content analysis tool.
 
 
 # Note
-## my first language is dutch and not english. Because of this some variables, constants, functions and comentations may be in dutch. feel free to put them in english
-
+### my first language is dutch and not english. Because of this some variables, constants, functions and comentations may be in dutch. feel free to put them in english
+### Also a lot is done with chatgpt and github copilot. Not everything. just things i didnt knew.
 ## TODO
 ### bra size Recognition see:
 - https://github.com/gg46power/Oppai-dataset
