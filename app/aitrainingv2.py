@@ -174,7 +174,13 @@ id_to_index = {id: index for index, id in enumerate(np.unique(performer_ids))}
 
 # Create a list of image paths and labels
 image_paths = [item['image_path'] for item in dataset]
-labels = [id_to_index[item['id']] for item in dataset if item['id'] in id_to_index]
+labels = [id_to_index[item['id']] for item in dataset if item['id'] in id_to_index and item['id'] is not None]
+
+# Add logging to check the number of labels and detect invalid labels
+logging.info(f"Number of labels: {len(labels)}")
+invalid_labels = [label for label in labels if label is None]
+if invalid_labels:
+    logging.error(f"Invalid labels detected: {invalid_labels}")
 
 # Ensure proper labeling by checking the labels and image paths
 def verify_labels_and_images(image_paths, labels, description):
@@ -244,7 +250,6 @@ def map_fn_with_counter(image_path, label):
         return image, label
     except Exception as e:
         return tf.zeros((224, 224, 3), dtype=np.float32), tf.constant(-1, dtype=tf.int32)
-
 
 # Apply batching early
 def create_batched_dataset(image_paths, labels, batch_size):
@@ -352,43 +357,18 @@ model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
               metrics=['accuracy'])
 logging.info("Model compilation complete.")
 
-# Class weights to handle class imbalance
-class_weights = {i: 1.0 for i in range(len(id_to_index))}
-# Optionally, adjust weights based on class distribution
+# Debugging Class Weights
+from collections import Counter
 
-def calculate_total_elements(dataset, description):
+# Count label occurrences
+label_counts = Counter(labels)
+logging.info(f"Label counts: {label_counts}")
 
-    logging.info("Calculating total elements in the dataset......")
-    total_elements = dataset_size 
-    return total_elements
+# Compute class weights
+total_samples = sum(label_counts.values())
+class_weights = {label: total_samples / count for label, count in label_counts.items()}
 
-
-# Ensure labels are properly formatted
-def ensure_labels_format(dataset, description):
-    total_elements = calculate_total_elements(dataset, description)
-    
-    logging.info(f"Total elements calculated - {total_elements}. Ensuring labels are properly formatted.")
-
-    def check_image_and_label(image, label):
-        logging.debug(f"Checking image and label: {image.shape}, {label.shape}")
-        tf.debugging.assert_equal(tf.rank(label), 0, message="Label shape is incorrect")
-        return image, label
-
-    dataset = dataset.map(check_image_and_label, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-
-    processed_count = 0
-    with tqdm(total=total_elements, desc=description) as pbar:
-        for _ in dataset:
-            pbar.update(1)
-            processed_count += 1
-            if processed_count % 1000 == 0:
-                logging.info(f"Processed {processed_count} elements")
-        pbar.close()  # Ensure the progress bar is closed after processing
-
-logging.info("Ensuring labels are properly formatted.")
-ensure_labels_format(train_dataset.concatenate(val_dataset), "Verifying dataset labels")
-logging.info("Label format verification complete.")
+# logging.info(f"Class weights: {class_weights}")
 
 # Train the model with class weights
 try:
