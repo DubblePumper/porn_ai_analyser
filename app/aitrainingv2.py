@@ -18,6 +18,8 @@ from tqdm import tqdm  # Add tqdm for progress bar
 import psutil  # Add psutil for memory monitoring
 import signal  # Add signal for timeout handling
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+# Debugging Class Weights
+from collections import Counter
 import logging  # Add logging module
 
 # Suppress specific TensorFlow warnings
@@ -43,40 +45,55 @@ logging.info("Num GPUs Available: %d" % len(tf.config.list_physical_devices('GPU
 
 
 def count_performers_in_json(json_path):
+    logging.info(f"Counting performers in JSON file: {json_path}")
     with open(json_path, 'r') as f:
         performer_data = json.load(f)
-    return len(performer_data)
+    count = len(performer_data)
+    logging.info(f"Number of performers: {count}")
+    return count
 
 
 def count_subfolders(path):
+    logging.info(f"Counting subfolders in path: {path}")
     subfolders = [name for name in os.listdir(path) if os.path.isdir(os.path.join(path, name))]
-    return len(subfolders)
+    count = len(subfolders)
+    logging.info(f"Number of subfolders: {count}")
+    return count
 
 
 # Laad performer data uit JSON
+logging.info(f"Loading performer data from JSON file: {performer_data_path}")
 with open(performer_data_path, 'r') as f:
     performer_data = json.load(f)
+logging.info(f"Loaded performer data. Number of performers: {len(performer_data)}")
 
 # Maak een dictionary van performer id naar gegevens
+logging.info("Creating performer info dictionary.")
 performer_info = {performer['slug']: performer for performer in performer_data}
+logging.info(f"Performer info dictionary created. Number of entries: {len(performer_info)}")
 
 # Define label_to_index
+logging.info("Defining label to index mapping.")
 labels = [performer['slug'] for performer in performer_data]
 label_to_index = {label: index for index, label in enumerate(np.unique(labels))}
+logging.info(f"Label to index mapping created. Number of labels: {len(label_to_index)}")
 
 
 # Check if TensorFlow can detect the GPU and required libraries are available
 def check_gpu_availability():
+    logging.info("Checking GPU availability.")
     try:
         physical_devices = tf.config.list_physical_devices('GPU')
         if len(physical_devices) > 0:
             for device in physical_devices:
                 tf.config.experimental.set_memory_growth(device, True)
+            logging.info("GPU is available.")
             return True
         else:
+            logging.info("GPU is not available.")
             return False
     except Exception as e:
-        print(f"Error checking GPU availability: {e}")
+        logging.error(f"Error checking GPU availability: {e}")
         return False
 
 
@@ -117,6 +134,7 @@ def safe_load_img_with_timeout(path, target_size, timeout=5):
         except UnidentifiedImageError:
             return np.zeros((target_size[0], 224, 3))
         except Exception as e:
+            logging.error(f"Error loading image: {e}")
             return np.zeros((target_size[0], target_size[1], 3))
 
     try:
@@ -124,6 +142,7 @@ def safe_load_img_with_timeout(path, target_size, timeout=5):
             future = executor.submit(load_image)
             return future.result(timeout=timeout)
     except TimeoutError:
+        logging.error(f"Timeout loading image: {path}")
         return np.zeros((target_size[0], target_size[1], 3))
 
 
@@ -131,14 +150,17 @@ def safe_load_img_with_timeout(path, target_size, timeout=5):
 def safe_load_img(path, target_size):
     image = safe_load_img_with_timeout(path, target_size)
     if image is None or not np.all(image.shape == (224, 224, 3)):
+        logging.warning("Image is invalid, returning blank image.")
         image = np.zeros((224, 224, 3), dtype=np.float32)  # Fallback to a blank image
     return image
 
 
 # Create dataset with metadata
 def create_dataset_with_basic_info(performer_info, output_path):
+    logging.info(f"Creating dataset with basic info. Output path: {output_path}")
     data = []
     total_images = sum(len(performer['image_urls']) for performer in performer_info.values())
+    logging.info(f"Total images to process: {total_images}")
 
     with tqdm(total=total_images, desc="Processing images") as pbar:
         for performer in performer_info.values():
@@ -155,6 +177,8 @@ def create_dataset_with_basic_info(performer_info, output_path):
             performer['image_urls'] = valid_image_urls  # Update with valid image URLs only
 
     np.save(output_path, data)
+    logging.info("Dataset with basic info created and saved.")
+
 
 # Create the dataset with basic info
 start_time = time.time()  # Start timing
@@ -169,40 +193,59 @@ dataset = np.load(output_dataset_path, allow_pickle=True)
 logging.info(f"Dataset loaded. Total items: {len(dataset)}")
 
 # Create a mapping from performer IDs to integer labels
+logging.info("Creating mapping from performer IDs to integer labels.")
 performer_ids = [performer['id'] for performer in performer_data]
 id_to_index = {id: index for index, id in enumerate(np.unique(performer_ids))}
+logging.info(f"Mapping created. Number of unique performer IDs: {len(id_to_index)}")
 
 # Create a list of image paths and labels
+logging.info("Creating list of image paths and labels.")
 image_paths = [item['image_path'] for item in dataset]
-labels = [id_to_index[item['id']] for item in dataset if item['id'] in id_to_index and item['id'] is not None]
-
-# Add logging to check the number of labels and detect invalid labels
-logging.info(f"Number of labels: {len(labels)}")
-invalid_labels = [label for label in labels if label is None]
-if invalid_labels:
-    logging.error(f"Invalid labels detected: {invalid_labels}")
+labels = [id_to_index.get(item['id'], None) for item in dataset if item['id'] in id_to_index and item['id'] is not None]
+logging.info(f"Image paths and labels created. Number of labels: {len(labels)}")
 
 # Ensure proper labeling by checking the labels and image paths
 def verify_labels_and_images(image_paths, labels, description):
+    logging.info(f"Verifying labels and images. Description: {description}")
     valid_image_paths = []
     valid_labels = []
 
     with tqdm(total=len(image_paths), desc=description) as pbar:
         for image_path, label in zip(image_paths, labels):
-            if os.path.isfile(image_path) and not is_image_corrupt(image_path) and 0 <= label < len(label_to_index):
+            if label is not None and isinstance(label, int) and os.path.isfile(image_path) and not is_image_corrupt(image_path) and 0 <= label < len(label_to_index):
                 valid_image_paths.append(image_path)
-                valid_labels.append(label)
+                valid_labels.append(int(label))  # Ensure labels are integers
+            else:
+                logging.warning(f"Invalid label or image: label={label}, image_path={image_path}")
             pbar.update(1)
 
+    logging.info(f"Verification complete. Valid images: {len(valid_image_paths)}")
+    logging.info(f"Valid labels: {valid_labels[:10]}... (showing first 10 labels)")
     return valid_image_paths, valid_labels
 
 logging.info("Verifying labels and images.")
 image_paths, labels = verify_labels_and_images(image_paths, labels, "Verifying labels and images")
 logging.info(f"Verification complete. Valid images: {len(image_paths)}")
 
+# Filter out any remaining None labels
+logging.info("Filtering out any remaining None labels.")
+image_paths, labels = zip(*[(path, label) for path, label in zip(image_paths, labels) if label is not None])
+logging.info(f"Filtering complete. Number of valid labels: {len(labels)}")
+
+# Convert image_paths and labels to numpy arrays
+logging.info("Converting image paths and labels to numpy arrays.")
+image_paths = np.array(image_paths)
+labels = np.array(labels)
+logging.info("Conversion complete.")
+
+# Ensure no None labels remain
+if any(label is None for label in labels):
+    raise ValueError("There are still None labels present after filtering.")
+
 # Add image counter
 total_images = len(image_paths)
 processed_images = 0
+logging.info(f"Total images: {total_images}, Processed images: {processed_images}")
 
 # Function to load image and label
 def load_image_and_label(image_path, label):
@@ -221,11 +264,12 @@ def load_image_and_label(image_path, label):
             return image, label
 
         except Exception as e:
+            logging.error(f"Error loading image and label: {e}")
             return np.zeros((224, 224, 3), dtype=np.float32), -1
 
     image, label = tf.py_function(func=_load_image_and_label, inp=[image_path, label], Tout=[tf.float32, tf.int32])
-    image.set_shape((224, 224, 3))
-    label.set_shape(())
+    image.set_shape((224, 224, 3))  # Ensure the shape is set correctly
+    label.set_shape(())  # Ensure the shape is set correctly
     return image, label
 
 # Simplified map function for clarity
@@ -249,39 +293,54 @@ def map_fn_with_counter(image_path, label):
         processed_images += 1  # Update processed count
         return image, label
     except Exception as e:
-        return tf.zeros((224, 224, 3), dtype=np.float32), tf.constant(-1, dtype=tf.int32)
+        logging.error(f"Error in map_fn_with_counter: {e}")
+        return tf.zeros((224, 224, 3), dtype=tf.float32), tf.constant(-1, dtype=tf.int32)
 
 # Apply batching early
 def create_batched_dataset(image_paths, labels, batch_size):
     global dataset_size  # Declare the global variable
-    dataset_size = 151393
+    dataset_size = 0  # Initialize dataset size
+
+    # Calculate the dataset size using a for loop
+    for _ in image_paths:
+        dataset_size += 1
+
+    logging.info(f"Creating batched dataset. Dataset size: {dataset_size}, Batch size: {batch_size}")
 
     # Create a TensorFlow Dataset with image paths and labels
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
 
     # Apply mapping with the enhanced image-label loader
+    logging.info("Mapping dataset with image-label loader.")
     dataset = dataset.map(
         lambda x, y: tf.py_function(func=load_image_and_label, inp=[x, y], Tout=(tf.float32, tf.int32)),
         num_parallel_calls=tf.data.AUTOTUNE
     )
+    logging.info("Filtering invalid labels.")
     dataset = dataset.filter(lambda image, label: tf.reduce_all(label >= 0))  # Filter out invalid labels
+
     # Apply batch and prefetch for performance
+    logging.info("Batching and prefetching dataset.")
     dataset = dataset.batch(BATCH_SIZE).prefetch(buffer_size=tf.data.AUTOTUNE)
     dataset = dataset.map(lambda image, label: (tf.ensure_shape(image, [None, 224, 224, 3]), tf.ensure_shape(label, [None])), num_parallel_calls=tf.data.AUTOTUNE)
     
     # Set the shape and name for the dataset elements
     dataset = dataset.map(lambda image, label: (tf.identity(image, name="image"), tf.identity(label, name="label")), num_parallel_calls=tf.data.AUTOTUNE)
     
+    logging.info("Batched dataset created successfully.")
     return dataset
 
 # Create a batched tf.data.Dataset from the image paths and labels
 logging.info("Creating batched dataset.")
 dataset = create_batched_dataset(image_paths, labels, BATCH_SIZE)
+logging.info("Batched dataset created.")
 
 # Verify the dataset after filtering
+logging.info("Verifying the dataset after filtering.")
 for image, label in dataset.take(5):
     image.set_shape([None, 224, 224, 3])
     label.set_shape([None])
+logging.info("Dataset verification complete.")
 
 # Apply parallel mapping and prefetching
 logging.info("Applying parallel mapping and prefetching.")
@@ -357,23 +416,51 @@ model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
               metrics=['accuracy'])
 logging.info("Model compilation complete.")
 
-# Debugging Class Weights
-from collections import Counter
+
 
 # Count label occurrences
 label_counts = Counter(labels)
-logging.info(f"Label counts: {label_counts}")
+
+# Log the first 10 label counts for debugging
+logging.info(f"Label counts (first 10): {list(label_counts.items())[:10]}")
+
+# Ensure all labels are integers
+label_counts = {int(label): count for label, count in label_counts.items()}
 
 # Compute class weights
 total_samples = sum(label_counts.values())
-class_weights = {label: total_samples / count for label, count in label_counts.items()}
+class_weights = {label: total_samples / count for label, count in label_counts.items() if count > 0}
 
-# logging.info(f"Class weights: {class_weights}")
+# Ensure class weights do not contain None values
+class_weights = {label: weight for label, weight in class_weights.items() if label is not None}
+
+# Normalize class weights to ensure they are within a reasonable range
+max_weight = max(class_weights.values())
+class_weights = {label: weight / max_weight for label, weight in class_weights.items()}
+
+# Summarize class weights
+min_weight = min(class_weights.values())
+max_weight = max(class_weights.values())
+avg_weight = sum(class_weights.values()) / len(class_weights)
+
+logging.info(f"Class weights summary: min={min_weight}, max={max_weight}, avg={avg_weight}")
+logging.info(f"Class weights: {list(class_weights.items())[:10]}... (showing first 10 weights)")
+
+# Add detailed logging to debug class weights
+for label, weight in class_weights.items():
+    if not isinstance(label, int) or not isinstance(weight, (int, float)):
+        logging.error(f"Invalid class weight: label={label}, weight={weight}")
+        raise ValueError("Class weights are not correctly formatted. Ensure all labels are integers and weights are numeric.")
 
 # Train the model with class weights
 try:
+    logging.info(f"Training for {MAX_EPOCHS} epochs.")
+    if MAX_EPOCHS is None or MAX_EPOCHS <= 0:
+        raise ValueError("Invalid number of epochs. Check MAX_EPOCHS value.")
+    
     logging.info("Starting model training.")
     if gpu_available:
+        logging.info("Using GPU for training.")
         with tf.device('/GPU:0'):
             epoch_pbar = tqdm(total=MAX_EPOCHS, desc="Training epochs")
             history = model.fit(
@@ -390,6 +477,7 @@ try:
             )
             epoch_pbar.close()
     else:
+        logging.info("Using CPU for training.")
         with tf.device('/CPU:0'):
             epoch_pbar = tqdm(total=MAX_EPOCHS, desc="Training epochs")
             history = model.fit(
@@ -408,6 +496,8 @@ try:
     logging.info("Model training complete.")
 except Exception as e:
     logging.error(f"Error during model training: {e}")
+    logging.error(f"MAX_EPOCHS: {MAX_EPOCHS}, gpu_available: {gpu_available}")
+    logging.error(f"train_dataset: {train_dataset}, val_dataset: {val_dataset}")
     history = None
 
 # Sla het model op
