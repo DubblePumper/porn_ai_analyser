@@ -37,7 +37,7 @@ An AI-powered video content analysis tool.
 
 
 ## Project Structure
-### It is a bit of a mess right now. i usally don't work with so mutch files.
+### It is a bit of a mess right now. i usually don't work with so much files.
 - key map is /app
 - /app/ai_things are pretrained models (i think)
 - /app/datasets/ has everything that connects with datasets.
