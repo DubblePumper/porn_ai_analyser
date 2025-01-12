@@ -204,6 +204,7 @@ image_paths = [item['image_path'] for item in dataset]
 labels = [id_to_index.get(item['id'], None) for item in dataset if item['id'] in id_to_index and item['id'] is not None]
 logging.info(f"Image paths and labels created. Number of labels: {len(labels)}")
 
+
 # Ensure proper labeling by checking the labels and image paths
 def verify_labels_and_images(image_paths, labels, description):
     logging.info(f"Verifying labels and images. Description: {description}")
@@ -212,7 +213,8 @@ def verify_labels_and_images(image_paths, labels, description):
 
     with tqdm(total=len(image_paths), desc=description) as pbar:
         for image_path, label in zip(image_paths, labels):
-            if label is not None and isinstance(label, int) and os.path.isfile(image_path) and not is_image_corrupt(image_path) and 0 <= label < len(label_to_index):
+            if label is not None and isinstance(label, int) and os.path.isfile(image_path) and not is_image_corrupt(
+                    image_path) and 0 <= label < len(label_to_index):
                 valid_image_paths.append(image_path)
                 valid_labels.append(int(label))  # Ensure labels are integers
             else:
@@ -222,6 +224,7 @@ def verify_labels_and_images(image_paths, labels, description):
     logging.info(f"Verification complete. Valid images: {len(valid_image_paths)}")
     logging.info(f"Valid labels: {valid_labels[:10]}... (showing first 10 labels)")
     return valid_image_paths, valid_labels
+
 
 logging.info("Verifying labels and images.")
 image_paths, labels = verify_labels_and_images(image_paths, labels, "Verifying labels and images")
@@ -247,18 +250,22 @@ total_images = len(image_paths)
 processed_images = 0
 logging.info(f"Total images: {total_images}, Processed images: {processed_images}")
 
+
 # Function to load image and label
 def load_image_and_label(image_path, label):
     def _load_image_and_label(image_path, label):
         try:
-            # Convert image_path to string
-            image_path = tf.compat.as_str_any(image_path.numpy())
-            # Convert label to integer
-            label = int(label.numpy())
+            # Ensure image_path is a valid string and label is a scalar
+            image_path = image_path.numpy().decode('utf-8') if isinstance(image_path.numpy(), bytes) else str(image_path.numpy())
+            label = label.numpy()
+            if isinstance(label, np.ndarray) and label.size == 1:
+                label = label.item()  # Ensure label is a scalar
 
             # Load and preprocess the image
             image = safe_load_img(image_path, target_size=(224, 224))
-            if image.shape != (224, 224, 3):
+            
+            # Validate image shape
+            if not np.all(image.shape == (224, 224, 3)):
                 raise ValueError("Image shape mismatch")
 
             return image, label
@@ -267,34 +274,35 @@ def load_image_and_label(image_path, label):
             logging.error(f"Error loading image and label: {e}")
             return np.zeros((224, 224, 3), dtype=np.float32), -1
 
-    image, label = tf.py_function(func=_load_image_and_label, inp=[image_path, label], Tout=[tf.float32, tf.int32])
-    image.set_shape((224, 224, 3))  # Ensure the shape is set correctly
-    label.set_shape(())  # Ensure the shape is set correctly
+    # Use tf.py_function
+    image, label = tf.py_function(func=_load_image_and_label, inp=[image_path, label], Tout=(tf.float32, tf.int32))
+    image.set_shape((224, 224, 3))
+    label.set_shape([])  # Ensure label is a scalar
     return image, label
 
+
 # Simplified map function for clarity
-def map_fn_with_counter(image_path, label):
+def map_fn_with_counter(image_paths, labels):
     global processed_images
     try:
-        # Ensure label is valid before processing the image
-        if label == -1:
-            raise ValueError("Invalid label detected during mapping")
+        images = []
+        new_labels = []
+        for image_path, label in zip(image_paths, labels):
+            image, label = load_image_and_label(image_path, label)
 
-        # Convert image_path and label to numpy values
-        image_path = image_path.numpy().decode('utf-8')
-        label = int(label.numpy())
+            # Validate shapes
+            if not np.all(image.shape == (224, 224, 3)):
+                raise ValueError("Invalid image shape")
 
-        image, label = load_image_and_label(image_path, label)
+            images.append(image)
+            new_labels.append(label)
 
-        # Image shape validation
-        if not np.all(image.shape == (224, 224, 3)):
-            raise ValueError("Invalid image shape")
-
-        processed_images += 1  # Update processed count
-        return image, label
+        # Return appropriately reshaped arrays
+        return np.array(images).reshape(-1, 224, 224, 3), np.array(new_labels).reshape(-1)
     except Exception as e:
         logging.error(f"Error in map_fn_with_counter: {e}")
-        return tf.zeros((224, 224, 3), dtype=tf.float32), tf.constant(-1, dtype=tf.int32)
+        return tf.zeros((BATCH_SIZE, 224, 224, 3), dtype=tf.float32), tf.constant([-1] * BATCH_SIZE, dtype=tf.int32)
+
 
 # Apply batching early
 def create_batched_dataset(image_paths, labels, batch_size):
@@ -322,13 +330,17 @@ def create_batched_dataset(image_paths, labels, batch_size):
     # Apply batch and prefetch for performance
     logging.info("Batching and prefetching dataset.")
     dataset = dataset.batch(BATCH_SIZE).prefetch(buffer_size=tf.data.AUTOTUNE)
-    dataset = dataset.map(lambda image, label: (tf.ensure_shape(image, [None, 224, 224, 3]), tf.ensure_shape(label, [None])), num_parallel_calls=tf.data.AUTOTUNE)
-    
+    dataset = dataset.map(
+        lambda image, label: (tf.ensure_shape(image, [None, 224, 224, 3]), tf.ensure_shape(label, [None])),
+        num_parallel_calls=tf.data.AUTOTUNE)
+
     # Set the shape and name for the dataset elements
-    dataset = dataset.map(lambda image, label: (tf.identity(image, name="image"), tf.identity(label, name="label")), num_parallel_calls=tf.data.AUTOTUNE)
-    
+    dataset = dataset.map(lambda image, label: (tf.identity(image, name="image"), tf.identity(label, name="label")),
+                          num_parallel_calls=tf.data.AUTOTUNE)
+
     logging.info("Batched dataset created successfully.")
     return dataset
+
 
 # Create a batched tf.data.Dataset from the image paths and labels
 logging.info("Creating batched dataset.")
@@ -338,6 +350,7 @@ logging.info("Batched dataset created.")
 # Verify the dataset after filtering
 logging.info("Verifying the dataset after filtering.")
 for image, label in dataset.take(5):
+    logging.info(f"Image shape: {image.shape}, Label shape: {label.shape}")
     image.set_shape([None, 224, 224, 3])
     label.set_shape([None])
 logging.info("Dataset verification complete.")
@@ -416,8 +429,6 @@ model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
               metrics=['accuracy'])
 logging.info("Model compilation complete.")
 
-
-
 # Count label occurrences
 label_counts = Counter(labels)
 
@@ -450,14 +461,90 @@ logging.info(f"Class weights: {list(class_weights.items())[:10]}... (showing fir
 for label, weight in class_weights.items():
     if not isinstance(label, int) or not isinstance(weight, (int, float)):
         logging.error(f"Invalid class weight: label={label}, weight={weight}")
-        raise ValueError("Class weights are not correctly formatted. Ensure all labels are integers and weights are numeric.")
+        raise ValueError(
+            "Class weights are not correctly formatted. Ensure all labels are integers and weights are numeric.")
+
+# Ensure MAX_EPOCHS is properly defined
+assert MAX_EPOCHS is not None and MAX_EPOCHS > 0, "MAX_EPOCHS must be a positive integer."
+
+# Ensure all labels are integers and not None
+logging.info("Ensuring all labels are integers and not None.")
+labels = [label for label in labels if label is not None]
+labels = np.array(labels, dtype=int)
+logging.info(f"Labels after filtering: {labels[:10]}... (showing first 10 labels)")
+
+# Ensure class weights do not contain None values and are properly formatted
+logging.info("Ensuring class weights do not contain None values and are properly formatted.")
+class_weights = {label: weight for label, weight in class_weights.items() if
+                 label is not None and isinstance(label, int) and isinstance(weight, (int, float))}
+logging.info(f"Class weights after filtering: {list(class_weights.items())[:10]}... (showing first 10 weights)")
+
+# Normalize class weights to ensure they are within a reasonable range
+if class_weights:
+    max_weight = max(class_weights.values())
+    class_weights = {label: weight / max_weight for label, weight in class_weights.items()}
+    logging.info(f"Class weights after normalization: {list(class_weights.items())[:10]}... (showing first 10 weights)")
+
+# Summarize class weights
+if class_weights:
+    min_weight = min(class_weights.values())
+    max_weight = max(class_weights.values())
+    avg_weight = sum(class_weights.values()) / len(class_weights)
+
+    logging.info(f"Class weights summary: min={min_weight}, max={max_weight}, avg={avg_weight}")
+    logging.info(f"Class weights: {list(class_weights.items())[:10]}... (showing first 10 weights)")
+
+# Add detailed logging to debug class weights
+for label, weight in class_weights.items():
+    if not isinstance(label, int) or not isinstance(weight, (int, float)):
+        logging.error(f"Invalid class weight: label={label}, weight={weight}")
+        raise ValueError(
+            "Class weights are not correctly formatted. Ensure all labels are integers and weights are numeric.")
+
+# Ensure no None labels remain
+logging.info("Ensuring no None labels remain.")
+if any(label is None for label in labels):
+    raise ValueError("There are still None labels present after filtering.")
+
+# Add detailed logging for dataset preparation
+logging.info(f"Total images: {len(image_paths)}, Labels: {len(labels)}")
+for i, label in enumerate(labels):
+    if label is None:
+        logging.error(f"Label at index {i} is None. Associated image: {image_paths[i]}")
+
+# Add detailed logging for dataset elements
+logging.info("Logging dataset elements for debugging.")
+for image, label in dataset.take(5):
+    logging.info(f"Image shape: {image.shape}, Label: {label}")
+
+# Validate dataset contents
+logging.info("Validating dataset contents.")
+for x, y in train_dataset.take(1):
+    assert x is not None, "Image data contains None."
+    assert y is not None, "Label data contains None."
+    logging.info(f"Sample image: {x.shape}, Label: {y}")
+
+# Check dataset consistency for shape and type
+logging.info("Checking dataset consistency for shape and type.")
+for images, labels in train_dataset.take(1):
+    assert images is not None and labels is not None, "Dataset contains None."
+    logging.info(f"Train batch shapes: {images.shape}, {labels.shape}")
+for images, labels in val_dataset.take(1):
+    assert images is not None and labels is not None, "Dataset contains None."
+    logging.info(f"Validation batch shapes: {images.shape}, {labels.shape}")
+
+# Calculate steps_per_epoch and validation_steps
+steps_per_epoch = len(train_dataset) if hasattr(train_dataset, "__len__") else None
+validation_steps = len(val_dataset) if hasattr(val_dataset, "__len__") else None
+
+if steps_per_epoch is None or validation_steps is None:
+    logging.error(f"Invalid dataset splitting: steps_per_epoch={steps_per_epoch}, validation_steps={validation_steps}")
+else:
+    logging.info(f"steps_per_epoch: {steps_per_epoch}, validation_steps: {validation_steps}")
 
 # Train the model with class weights
 try:
     logging.info(f"Training for {MAX_EPOCHS} epochs.")
-    if MAX_EPOCHS is None or MAX_EPOCHS <= 0:
-        raise ValueError("Invalid number of epochs. Check MAX_EPOCHS value.")
-    
     logging.info("Starting model training.")
     if gpu_available:
         logging.info("Using GPU for training.")
@@ -465,13 +552,22 @@ try:
             epoch_pbar = tqdm(total=MAX_EPOCHS, desc="Training epochs")
             history = model.fit(
                 train_dataset,
-                epochs=MAX_EPOCHS,
                 validation_data=val_dataset,
+                epochs=MAX_EPOCHS,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
                 class_weight=class_weights,
                 callbacks=[
                     tf.keras.callbacks.LambdaCallback(
-                        on_epoch_end=lambda epoch, logs: epoch_pbar.update(1),
-                        on_train_batch_end=lambda batch, logs: None  # Disable batch logging
+                        on_epoch_end=lambda epoch, logs: (
+                            logging.info(
+                                f"Epoch {epoch + 1}/{MAX_EPOCHS} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f} - val_loss: {logs.get('val_loss'):.4f} - val_accuracy: {logs.get('val_accuracy'):.4f}"),
+                            epoch_pbar.update(1)
+                        ),
+                        on_train_batch_end=lambda batch, logs: (
+                            logging.info(
+                                f"Batch {batch} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f}")
+                        )
                     )
                 ]
             )
@@ -482,13 +578,22 @@ try:
             epoch_pbar = tqdm(total=MAX_EPOCHS, desc="Training epochs")
             history = model.fit(
                 train_dataset,
-                epochs=MAX_EPOCHS,
                 validation_data=val_dataset,
+                epochs=MAX_EPOCHS,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
                 class_weight=class_weights,
                 callbacks=[
                     tf.keras.callbacks.LambdaCallback(
-                        on_epoch_end=lambda epoch, logs: epoch_pbar.update(1),
-                        on_train_batch_end=lambda batch, logs: None  # Disable batch logging
+                        on_epoch_end=lambda epoch, logs: (
+                            logging.info(
+                                f"Epoch {epoch + 1}/{MAX_EPOCHS} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f} - val_loss: {logs.get('val_loss'):.4f} - val_accuracy: {logs.get('val_accuracy'):.4f}"),
+                            epoch_pbar.update(1)
+                        ),
+                        on_train_batch_end=lambda batch, logs: (
+                            logging.info(
+                                f"Batch {batch} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f}")
+                        )
                     )
                 ]
             )
@@ -506,10 +611,13 @@ model.build(input_shape=(None, 224, 224, 3))  # Define the input shape before sa
 model.save("performer_recognition_model", save_format="tf")  # Sla het getrainde model op als een bestand
 logging.info("Model saved successfully.")
 
-# Evaluate the model after training
+# Ensure the input shape is known during evaluation
 if val_size > 0:
     try:
         logging.info("Evaluating the model.")
+        for image, label in val_dataset.take(1):
+            image.set_shape([None, 224, 224, 3])
+            label.set_shape([None])
         evaluation = model.evaluate(val_dataset)
         logging.info(f"Validation loss: {evaluation[0]:.4f}, Validation accuracy: {evaluation[1]:.4f}")
     except Exception as e:
