@@ -27,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 
 # Instellingen
 MAX_EPOCHS = 20
-BATCH_SIZE = 8
+BATCH_SIZE = 4  # Reduce batch size to lower memory
 dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
 performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json"
 output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
@@ -99,6 +99,14 @@ def check_gpu_availability():
 
 gpu_available = check_gpu_availability()
 logging.info(f"GPU available: {gpu_available}")
+
+# Immediately after checking gpu_available:
+physical_devices = tf.config.list_physical_devices('GPU')
+if gpu_available and physical_devices:
+    tf.config.experimental.set_virtual_device_configuration(
+        physical_devices[0],
+        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=8192)]
+    )
 
 
 # Functie om te controleren of een afbeelding corrupt is
@@ -293,52 +301,47 @@ def map_fn_with_counter(image_paths, labels):
             # Validate shapes
             if not np.all(image.shape == (224, 224, 3)):
                 raise ValueError("Invalid image shape")
+            if isinstance(label, tf.Tensor):
+                label = int(label.numpy())  # Convert EagerTensor to int
+            if not isinstance(label, int):
+                logging.error(f"Invalid label type: {type(label)} - {label}")
+                raise ValueError("Invalid label type")
 
             images.append(image)
             new_labels.append(label)
 
-        # Return appropriately reshaped arrays
-        return np.array(images).reshape(-1, 224, 224, 3), np.array(new_labels).reshape(-1)
+        # Convert to TensorFlow tensors for further processing
+        return tf.convert_to_tensor(images, dtype=tf.float32), tf.convert_to_tensor(new_labels, dtype=tf.int32)
     except Exception as e:
         logging.error(f"Error in map_fn_with_counter: {e}")
+        # Return default tensors for error cases
         return tf.zeros((BATCH_SIZE, 224, 224, 3), dtype=tf.float32), tf.constant([-1] * BATCH_SIZE, dtype=tf.int32)
 
 
 # Apply batching early
 def create_batched_dataset(image_paths, labels, batch_size):
-    global dataset_size  # Declare the global variable
-    dataset_size = 0  # Initialize dataset size
+    logging.info(f"Creating batched dataset. Dataset size: {len(image_paths)}, Batch size: {batch_size}")
 
-    # Calculate the dataset size using a for loop
-    for _ in image_paths:
-        dataset_size += 1
-
-    logging.info(f"Creating batched dataset. Dataset size: {dataset_size}, Batch size: {batch_size}")
-
-    # Create a TensorFlow Dataset with image paths and labels
+    # Create a TensorFlow Dataset
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
 
-    # Apply mapping with the enhanced image-label loader
-    logging.info("Mapping dataset with image-label loader.")
+    # Map over dataset
     dataset = dataset.map(
         lambda x, y: tf.py_function(func=load_image_and_label, inp=[x, y], Tout=(tf.float32, tf.int32)),
         num_parallel_calls=tf.data.AUTOTUNE
     )
-    logging.info("Filtering invalid labels.")
-    dataset = dataset.filter(lambda image, label: tf.reduce_all(label >= 0))  # Filter out invalid labels
 
-    # Apply batch and prefetch for performance
-    logging.info("Batching and prefetching dataset.")
-    dataset = dataset.batch(BATCH_SIZE).prefetch(buffer_size=tf.data.AUTOTUNE)
+    # Assert shapes of tensors
     dataset = dataset.map(
-        lambda image, label: (tf.ensure_shape(image, [None, 224, 224, 3]), tf.ensure_shape(label, [None])),
-        num_parallel_calls=tf.data.AUTOTUNE)
+        lambda x, y: (
+            tf.ensure_shape(x, [224, 224, 3]),  # Ensure image shape
+            tf.ensure_shape(y, [])              # Ensure label shape
+        )
+    )
 
-    # Set the shape and name for the dataset elements
-    dataset = dataset.map(lambda image, label: (tf.identity(image, name="image"), tf.identity(label, name="label")),
-                          num_parallel_calls=tf.data.AUTOTUNE)
-
-    logging.info("Batched dataset created successfully.")
+    # Batch dataset, ensuring no double batching
+    dataset = dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+    
     return dataset
 
 
@@ -351,23 +354,9 @@ logging.info("Batched dataset created.")
 logging.info("Verifying the dataset after filtering.")
 for image, label in dataset.take(5):
     logging.info(f"Image shape: {image.shape}, Label shape: {label.shape}")
-    image.set_shape([None, 224, 224, 3])
-    label.set_shape([None])
+    assert image.shape == (BATCH_SIZE, 224, 224, 3), "Incorrect image batch shape"
+    assert label.shape == (BATCH_SIZE,), "Incorrect label batch shape"
 logging.info("Dataset verification complete.")
-
-# Apply parallel mapping and prefetching
-logging.info("Applying parallel mapping and prefetching.")
-with tqdm(total=total_images, desc="Loading images") as pbar:
-    def map_fn_with_progress(image_path, label):
-        image, label = tf.py_function(func=map_fn_with_counter, inp=[image_path, label], Tout=(tf.float32, tf.int32))
-        pbar.update(1)
-        return image, label
-
-    dataset = dataset.map(map_fn_with_progress, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.filter(lambda image, label: tf.reduce_all(label >= 0))  # Ensure invalid labels are filtered out
-    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-    pbar.close()  # Ensure the progress bar is closed after processing
-logging.info("Parallel mapping and prefetching complete.")
 
 # Split the dataset into training and validation sets
 logging.info("Splitting the dataset into training and validation sets.")
@@ -379,9 +368,9 @@ val_dataset = dataset.skip(train_size)
 logging.info(f"Dataset split complete. Training size: {train_size}, Validation size: {val_size}")
 
 # Batch and prefetch the datasets
-logging.info("Batching and prefetching the datasets.")
-train_dataset = train_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-val_dataset = val_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+# Removed the second batch calls:
+train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
 logging.info("Batching and prefetching complete.")
 
 logging.info("Loading the base model and feature extractor.")
@@ -542,63 +531,52 @@ if steps_per_epoch is None or validation_steps is None:
 else:
     logging.info(f"steps_per_epoch: {steps_per_epoch}, validation_steps: {validation_steps}")
 
-# Train the model with class weights
+class TQDMProgressBar(tf.keras.callbacks.Callback):
+    def __init__(self, epochs, steps_per_epoch):
+        self.epochs = epochs
+        self.steps_per_epoch = steps_per_epoch
+        self.pbar = None
+
+    def on_epoch_begin(self, epoch, logs=None):
+        tqdm.write(f"Epoch {epoch+1}/{self.epochs}")
+        self.pbar = tqdm(total=self.steps_per_epoch, position=0, leave=True)
+
+    def on_batch_end(self, batch, logs=None):
+        self.pbar.update(1)
+        # Remove or comment out set_postfix calls for speed:
+        # self.pbar.set_postfix(...)
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.pbar.close()
+        if logs:
+            tqdm.write(
+                f"End of Epoch {epoch+1} - loss: {logs.get('loss', 0):.4f}, accuracy: {logs.get('accuracy', 0):.4f}"
+            )
+
+class DebugCallback(tf.keras.callbacks.Callback):
+    def on_train_batch_end(self, batch, logs=None):
+        # Comment out frequent logging to reduce overhead:
+        # ...existing code...
+        pass
+
 try:
     logging.info(f"Training for {MAX_EPOCHS} epochs.")
     logging.info("Starting model training.")
-    if gpu_available:
-        logging.info("Using GPU for training.")
-        with tf.device('/GPU:0'):
-            epoch_pbar = tqdm(total=MAX_EPOCHS, desc="Training epochs")
-            history = model.fit(
-                train_dataset,
-                validation_data=val_dataset,
-                epochs=MAX_EPOCHS,
-                steps_per_epoch=steps_per_epoch,
-                validation_steps=validation_steps,
-                class_weight=class_weights,
-                callbacks=[
-                    tf.keras.callbacks.LambdaCallback(
-                        on_epoch_end=lambda epoch, logs: (
-                            logging.info(
-                                f"Epoch {epoch + 1}/{MAX_EPOCHS} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f} - val_loss: {logs.get('val_loss'):.4f} - val_accuracy: {logs.get('val_accuracy'):.4f}"),
-                            epoch_pbar.update(1)
-                        ),
-                        on_train_batch_end=lambda batch, logs: (
-                            logging.info(
-                                f"Batch {batch} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f}")
-                        )
-                    )
-                ]
-            )
-            epoch_pbar.close()
-    else:
-        logging.info("Using CPU for training.")
-        with tf.device('/CPU:0'):
-            epoch_pbar = tqdm(total=MAX_EPOCHS, desc="Training epochs")
-            history = model.fit(
-                train_dataset,
-                validation_data=val_dataset,
-                epochs=MAX_EPOCHS,
-                steps_per_epoch=steps_per_epoch,
-                validation_steps=validation_steps,
-                class_weight=class_weights,
-                callbacks=[
-                    tf.keras.callbacks.LambdaCallback(
-                        on_epoch_end=lambda epoch, logs: (
-                            logging.info(
-                                f"Epoch {epoch + 1}/{MAX_EPOCHS} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f} - val_loss: {logs.get('val_loss'):.4f} - val_accuracy: {logs.get('val_accuracy'):.4f}"),
-                            epoch_pbar.update(1)
-                        ),
-                        on_train_batch_end=lambda batch, logs: (
-                            logging.info(
-                                f"Batch {batch} - loss: {logs.get('loss'):.4f} - accuracy: {logs.get('accuracy'):.4f}")
-                        )
-                    )
-                ]
-            )
-            epoch_pbar.close()
+    progress_bar_callback = TQDMProgressBar(epochs=MAX_EPOCHS, steps_per_epoch=steps_per_epoch)
+    debug_callback = DebugCallback()
+
+    with tf.device('/GPU:0'):
+        history = model.fit(
+            train_dataset,
+            validation_data=val_dataset,
+            epochs=MAX_EPOCHS,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps,
+            class_weight=class_weights,
+            callbacks=[progress_bar_callback, debug_callback]
+        )
     logging.info("Model training complete.")
+
 except Exception as e:
     logging.error(f"Error during model training: {e}")
     logging.error(f"MAX_EPOCHS: {MAX_EPOCHS}, gpu_available: {gpu_available}")
@@ -614,12 +592,30 @@ logging.info("Model saved successfully.")
 # Ensure the input shape is known during evaluation
 if val_size > 0:
     try:
-        logging.info("Evaluating the model.")
-        for image, label in val_dataset.take(1):
-            image.set_shape([None, 224, 224, 3])
-            label.set_shape([None])
-        evaluation = model.evaluate(val_dataset)
-        logging.info(f"Validation loss: {evaluation[0]:.4f}, Validation accuracy: {evaluation[1]:.4f}")
+        logging.info("Evaluating the model with a progress bar.")
+        # Remove the old evaluation code:
+        # for image, label in val_dataset.take(1):
+        #     image.set_shape([None, 224, 224, 3])
+        #     label.set_shape([None])
+        # evaluation = model.evaluate(val_dataset)
+        # logging.info(f"Validation loss: {evaluation[0]:.4f}, Validation accuracy: {evaluation[1]:.4f}")
+
+        # Use a manual evaluation loop with TQDM instead:
+        total_loss = 0.0
+        total_acc = 0.0
+        steps = 0
+        with tqdm(total=len(val_dataset), desc="Evaluating", unit="batch") as pbar:
+            for images, labels in val_dataset:
+                result = model.test_on_batch(images, labels, reset_metrics=False)
+                total_loss += result[0]
+                total_acc += result[1]
+                steps += 1
+                pbar.update(1)
+
+        avg_loss = total_loss / steps
+        avg_acc = total_acc / steps
+        logging.info(f"Validation loss: {avg_loss:.4f}, Validation accuracy: {avg_acc:.4f}")
+
     except Exception as e:
         logging.error(f"Error during model evaluation: {e}")
 else:
