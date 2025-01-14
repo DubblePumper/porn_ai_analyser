@@ -27,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 
 # Instellingen
 MAX_EPOCHS = 20
-BATCH_SIZE = 4  # Reduce batch size to lower memory
+BATCH_SIZE = 8
 dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
 performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json"
 output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
@@ -99,14 +99,6 @@ def check_gpu_availability():
 
 gpu_available = check_gpu_availability()
 logging.info(f"GPU available: {gpu_available}")
-
-# Immediately after checking gpu_available:
-physical_devices = tf.config.list_physical_devices('GPU')
-if gpu_available and physical_devices:
-    tf.config.experimental.set_virtual_device_configuration(
-        physical_devices[0],
-        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=8192)]
-    )
 
 
 # Functie om te controleren of een afbeelding corrupt is
@@ -535,46 +527,66 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
     def __init__(self, epochs, steps_per_epoch):
         self.epochs = epochs
         self.steps_per_epoch = steps_per_epoch
-        self.pbar = None
+        self.epoch_bar = None
+        self.batch_bar = None
+
+    def on_train_begin(self, logs=None):
+        self.epoch_bar = tqdm(total=self.epochs, desc="Epochs", position=0)
 
     def on_epoch_begin(self, epoch, logs=None):
-        tqdm.write(f"Epoch {epoch+1}/{self.epochs}")
-        self.pbar = tqdm(total=self.steps_per_epoch, position=0, leave=True)
+        self.batch_bar = tqdm(total=self.steps_per_epoch, desc=f"Epoch {epoch+1}/{self.epochs}", position=1, leave=False)
 
     def on_batch_end(self, batch, logs=None):
-        self.pbar.update(1)
-        # Remove or comment out set_postfix calls for speed:
-        # self.pbar.set_postfix(...)
+        self.batch_bar.update(1)
 
     def on_epoch_end(self, epoch, logs=None):
-        self.pbar.close()
-        if logs:
-            tqdm.write(
-                f"End of Epoch {epoch+1} - loss: {logs.get('loss', 0):.4f}, accuracy: {logs.get('accuracy', 0):.4f}"
-            )
+        self.batch_bar.close()
+        self.epoch_bar.update(1)
+
+    def on_train_end(self, logs=None):
+        self.epoch_bar.close()
 
 class DebugCallback(tf.keras.callbacks.Callback):
+    def on_train_batch_begin(self, batch, logs=None):
+        self.batch_start_time = time.time()
+
     def on_train_batch_end(self, batch, logs=None):
-        # Comment out frequent logging to reduce overhead:
-        # ...existing code...
-        pass
+        elapsed = time.time() - self.batch_start_time
+        mem_usage = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        logging.info(f"Batch {batch} took {elapsed:.2f}s, memory usage ~ {mem_usage:.1f} MB")
 
 try:
     logging.info(f"Training for {MAX_EPOCHS} epochs.")
     logging.info("Starting model training.")
     progress_bar_callback = TQDMProgressBar(epochs=MAX_EPOCHS, steps_per_epoch=steps_per_epoch)
+
+    # Add DebugCallback to callbacks list
     debug_callback = DebugCallback()
 
-    with tf.device('/GPU:0'):
-        history = model.fit(
-            train_dataset,
-            validation_data=val_dataset,
-            epochs=MAX_EPOCHS,
-            steps_per_epoch=steps_per_epoch,
-            validation_steps=validation_steps,
-            class_weight=class_weights,
-            callbacks=[progress_bar_callback, debug_callback]
-        )
+    if gpu_available:
+        logging.info("Using GPU for training.")
+        with tf.device('/GPU:0'):
+            history = model.fit(
+                train_dataset,
+                validation_data=val_dataset,
+                epochs=MAX_EPOCHS,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
+                class_weight=class_weights,
+                callbacks=[progress_bar_callback, debug_callback]
+            )
+    else:
+        logging.info("Using CPU for training.")
+        with tf.device('/CPU:0'):
+            history = model.fit(
+                train_dataset,
+                validation_data=val_dataset,
+                epochs=MAX_EPOCHS,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
+                class_weight=class_weights,
+                callbacks=[progress_bar_callback, debug_callback]
+            )
     logging.info("Model training complete.")
 
 except Exception as e:
