@@ -524,41 +524,34 @@ else:
     logging.info(f"steps_per_epoch: {steps_per_epoch}, validation_steps: {validation_steps}")
 
 class TQDMProgressBar(tf.keras.callbacks.Callback):
-    def __init__(self, epochs, steps_per_epoch):
-        self.epochs = epochs
+    def __init__(self, steps_per_epoch):
         self.steps_per_epoch = steps_per_epoch
         self.epoch_bar = None
-        self.batch_bar = None
-
-    def on_train_begin(self, logs=None):
-        self.epoch_bar = tqdm(total=self.epochs, desc="Epochs", position=0)
 
     def on_epoch_begin(self, epoch, logs=None):
-        self.batch_bar = tqdm(total=self.steps_per_epoch, desc=f"Epoch {epoch+1}/{self.epochs}", position=1, leave=False)
+        if self.epoch_bar:
+            self.epoch_bar.close()
+        self.epoch_bar = tqdm(total=self.steps_per_epoch, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}", position=0)
 
     def on_batch_end(self, batch, logs=None):
-        self.batch_bar.update(1)
-
-    def on_epoch_end(self, epoch, logs=None):
-        self.batch_bar.close()
         self.epoch_bar.update(1)
 
-    def on_train_end(self, logs=None):
+    def on_epoch_end(self, epoch, logs=None):
         self.epoch_bar.close()
 
 class DebugCallback(tf.keras.callbacks.Callback):
-    def on_train_batch_begin(self, batch, logs=None):
-        self.batch_start_time = time.time()
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start_time = time.time()
 
-    def on_train_batch_end(self, batch, logs=None):
-        elapsed = time.time() - self.batch_start_time
+    def on_epoch_end(self, epoch, logs=None):
+        elapsed = time.time() - self.epoch_start_time
         mem_usage = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-        logging.info(f"Batch {batch} took {elapsed:.2f}s, memory usage ~ {mem_usage:.1f} MB")
+        logging.info(f"Epoch {epoch+1} took {elapsed:.2f}s, memory usage ~ {mem_usage:.1f} MB")
 
 try:
     logging.info(f"Training for {MAX_EPOCHS} epochs.")
     logging.info("Starting model training.")
-    progress_bar_callback = TQDMProgressBar(epochs=MAX_EPOCHS, steps_per_epoch=steps_per_epoch)
+    progress_bar_callback = TQDMProgressBar(steps_per_epoch=steps_per_epoch)
 
     # Add DebugCallback to callbacks list
     debug_callback = DebugCallback()
