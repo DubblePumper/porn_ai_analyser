@@ -27,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 
 # Instellingen
 MAX_EPOCHS = 20
-BATCH_SIZE = 8
+BATCH_SIZE = 64
 dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
 performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json"
 output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
