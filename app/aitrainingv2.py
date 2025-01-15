@@ -21,16 +21,27 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 # Debugging Class Weights
 from collections import Counter
 import logging  # Add logging module
+import argparse  # Add argparse for configuration
+from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping, LearningRateScheduler
 
 # Suppress specific TensorFlow warnings
 tf.get_logger().setLevel('ERROR')
 
-# Instellingen
-MAX_EPOCHS = 20
-BATCH_SIZE = 64
-dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
-performer_data_path = r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json"
-output_dataset_path = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='Train an AI model to recognize a person inside an image.')
+parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')  # Reduced batch size
+parser.add_argument('--max_epochs', type=int, default=20, help='Maximum number of epochs for training')
+parser.add_argument('--dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images", help='Path to the dataset')
+parser.add_argument('--performer_data_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json", help='Path to the performer data JSON file')
+parser.add_argument('--output_dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy", help='Path to save the output dataset with metadata')
+args = parser.parse_args()
+
+# Use parsed arguments
+BATCH_SIZE = args.batch_size
+MAX_EPOCHS = args.max_epochs
+dataset_path = args.dataset_path
+performer_data_path = args.performer_data_path
+output_dataset_path = args.output_dataset_path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -120,9 +131,25 @@ def timeout_handler(signum, frame):
     raise TimeoutException
 
 
-# Functie om afbeelding veilig te laden met timeout
+# Add a global counter for logging intervals
+image_counter = 0
+
+# Add a flag to track if memory usage has been logged
+memory_logged = False
+
+# Add more detailed logging for memory usage at specific intervals
+def log_memory_usage(message=""):
+    global memory_logged
+    if not memory_logged:
+        mem_usage = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        logging.info(f"{message} Current memory usage: {mem_usage:.1f} MB")
+        memory_logged = True
+
+
+# Add memory logging before and after loading images
 def safe_load_img_with_timeout(path, target_size, timeout=5):
     def load_image():
+        log_memory_usage("Before loading image")  # Log memory usage before loading image
         if is_image_corrupt(path):
             return np.zeros((target_size[0], target_size[1], 3))
         try:
@@ -130,6 +157,7 @@ def safe_load_img_with_timeout(path, target_size, timeout=5):
             img_array = img_to_array(img) / 255.0  # Normalize and ensure shape
             if img_array.shape != (224, 224, 3):  # Add explicit check
                 img_array = np.resize(img_array, (224, 224, 3))
+            log_memory_usage("After loading image")  # Log memory usage after loading image
             return img_array
         except UnidentifiedImageError:
             return np.zeros((target_size[0], 224, 3))
@@ -542,12 +570,27 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
 class DebugCallback(tf.keras.callbacks.Callback):
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_start_time = time.time()
+        log_memory_usage(f"Epoch {epoch+1} start")  # Log memory usage at the start of each epoch
 
     def on_epoch_end(self, epoch, logs=None):
         elapsed = time.time() - self.epoch_start_time
+        log_memory_usage(f"Epoch {epoch+1} end")  # Log memory usage at the end of each epoch
         mem_usage = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
         logging.info(f"Epoch {epoch+1} took {elapsed:.2f}s, memory usage ~ {mem_usage:.1f} MB")
 
+# Add learning rate scheduler
+def lr_scheduler(epoch, lr):
+    if epoch > 10:
+        lr = lr * 0.1
+    return lr
+
+# Add callbacks
+tensorboard_callback = TensorBoard(log_dir='./logs')
+checkpoint_callback = ModelCheckpoint(filepath='model_checkpoint.h5', save_best_only=True)
+early_stopping_callback = EarlyStopping(monitor='val_loss', patience=5)
+lr_scheduler_callback = LearningRateScheduler(lr_scheduler)
+
+# Add memory logging before and after model training
 try:
     logging.info(f"Training for {MAX_EPOCHS} epochs.")
     logging.info("Starting model training.")
@@ -555,6 +598,13 @@ try:
 
     # Add DebugCallback to callbacks list
     debug_callback = DebugCallback()
+
+    callbacks = [progress_bar_callback, debug_callback, tensorboard_callback, checkpoint_callback, early_stopping_callback, lr_scheduler_callback]
+
+    log_memory_usage("Before training")  # Log memory usage before training
+
+    # Clear the TensorFlow session to free up memory
+    tf.keras.backend.clear_session()
 
     if gpu_available:
         logging.info("Using GPU for training.")
@@ -566,7 +616,7 @@ try:
                 steps_per_epoch=steps_per_epoch,
                 validation_steps=validation_steps,
                 class_weight=class_weights,
-                callbacks=[progress_bar_callback, debug_callback]
+                callbacks=callbacks
             )
     else:
         logging.info("Using CPU for training.")
@@ -578,9 +628,12 @@ try:
                 steps_per_epoch=steps_per_epoch,
                 validation_steps=validation_steps,
                 class_weight=class_weights,
-                callbacks=[progress_bar_callback, debug_callback]
+                callbacks=callbacks
             )
+    
+    log_memory_usage("After training")  # Log memory usage after training
     logging.info("Model training complete.")
+    logging.info(f"Training history: {history.history}")
 
 except Exception as e:
     logging.error(f"Error during model training: {e}")
@@ -593,6 +646,12 @@ logging.info("Saving the model.")
 model.build(input_shape=(None, 224, 224, 3))  # Define the input shape before saving
 model.save("performer_recognition_model", save_format="tf")  # Sla het getrainde model op als een bestand
 logging.info("Model saved successfully.")
+
+# Save the label_to_index mapping
+logging.info("Saving the label_to_index mapping.")
+with open('label_to_index.json', 'w') as f:
+    json.dump(label_to_index, f)
+logging.info("label_to_index mapping saved successfully.")
 
 # Ensure the input shape is known during evaluation
 if val_size > 0:
