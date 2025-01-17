@@ -597,7 +597,12 @@ def lr_scheduler(epoch, lr):
 
 # Add callbacks
 tensorboard_callback = TensorBoard(log_dir='./logs')
-checkpoint_callback = ModelCheckpoint(filepath=model_save_path, save_best_only=False, save_freq='epoch')  # Save model every epoch
+class LoggingModelCheckpoint(ModelCheckpoint):
+    def on_epoch_end(self, epoch, logs=None):
+        super().on_epoch_end(epoch, logs)
+        logging.info(f"Model successfully saved at the end of epoch {epoch + 1}")
+
+checkpoint_callback = LoggingModelCheckpoint(filepath=model_save_path, save_best_only=False, save_freq='epoch')
 early_stopping_callback = EarlyStopping(monitor='val_loss', patience=5)
 lr_scheduler_callback = LearningRateScheduler(lr_scheduler)
 
