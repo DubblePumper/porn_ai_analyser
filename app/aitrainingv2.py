@@ -373,7 +373,7 @@ logging.info("Batched dataset created.")
 # Verify the dataset after filtering
 logging.info("Verifying the dataset after filtering.")
 for image, label in dataset.take(5):
-    logging.info(f"Image shape: {image.shape}, Label shape: {label.shape}")
+    logging.info(f"Image shape: {image.shape}, Label shape: {label.shape}, Label: {label.numpy()}")
     assert image.shape == (BATCH_SIZE, 224, 224, 3), "Incorrect image batch shape"
     assert label.shape == (BATCH_SIZE,), "Incorrect label batch shape"
 logging.info("Dataset verification complete.")
@@ -415,19 +415,30 @@ data_augmentation = keras.Sequential(
 )
 logging.info("Data augmentation setup complete.")
 
-# Bouw het aangepaste model
-logging.info("Building the custom model.")
+# Add logic to load the model if it exists
+model_save_path = "performer_recognition_model"
+if os.path.exists(model_save_path):
+    logging.info("Existing model_save_path found, but it may be incompatible. Please remove or rename it.")
+    logging.info("Building a new model instead.")
+
+class HFViTLogitsLayer(tf.keras.layers.Layer):
+    def __init__(self, base_model):
+        super().__init__()
+        self.base_model = base_model
+
+    def call(self, inputs):
+        return self.base_model({"pixel_values": inputs}).logits
+
 model = models.Sequential([
     data_augmentation,
-    layers.Input(shape=(224, 224, 3)),  # Ensure the input shape is correct
-    layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),  # Transpose to (None, 3, 224, 224)
-    base_model,
-    layers.Lambda(lambda x: x.logits),  # Extract logits from TFSequenceClassifierOutput
-    layers.Dense(512, activation='relu'),  # Directly use Dense layer
+    layers.Input(shape=(224, 224, 3)),
+    layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
+    HFViTLogitsLayer(base_model),
+    layers.Dense(512, activation='relu'),
     layers.Dropout(0.5),
     layers.Dense(256, activation='relu'),
     layers.Dropout(0.5),
-    layers.Dense(len(id_to_index), activation='softmax')  # Number of performers
+    layers.Dense(len(id_to_index), activation='softmax')
 ])
 logging.info("Custom model built.")
 
@@ -586,7 +597,7 @@ def lr_scheduler(epoch, lr):
 
 # Add callbacks
 tensorboard_callback = TensorBoard(log_dir='./logs')
-checkpoint_callback = ModelCheckpoint(filepath='model_checkpoint.h5', save_best_only=True)
+checkpoint_callback = ModelCheckpoint(filepath=model_save_path, save_best_only=False, save_freq='epoch')  # Save model every epoch
 early_stopping_callback = EarlyStopping(monitor='val_loss', patience=5)
 lr_scheduler_callback = LearningRateScheduler(lr_scheduler)
 
@@ -640,12 +651,6 @@ except Exception as e:
     logging.error(f"MAX_EPOCHS: {MAX_EPOCHS}, gpu_available: {gpu_available}")
     logging.error(f"train_dataset: {train_dataset}, val_dataset: {val_dataset}")
     history = None
-
-# Sla het model op
-logging.info("Saving the model.")
-model.build(input_shape=(None, 224, 224, 3))  # Define the input shape before saving
-model.save("performer_recognition_model", save_format="tf")  # Sla het getrainde model op als een bestand
-logging.info("Model saved successfully.")
 
 # Save the label_to_index mapping
 logging.info("Saving the label_to_index mapping.")
