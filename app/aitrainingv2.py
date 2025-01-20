@@ -23,6 +23,20 @@ from collections import Counter
 import logging  # Add logging module
 import argparse  # Add argparse for configuration
 from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping, LearningRateScheduler
+import shutil
+from tensorflow.keras import mixed_precision
+from functools import lru_cache
+import cv2
+
+# Move cache_key definition to the top, after imports
+@lru_cache(maxsize=100000)
+def cache_key(path):
+    """Generate a unique cache key for an image path based on path and modification time."""
+    try:
+        mtime = os.path.getmtime(path)
+        return f"{path}_{mtime}"
+    except OSError:
+        return path  # Fallback to just the path if can't get mtime
 
 # Suppress specific TensorFlow warnings
 tf.get_logger().setLevel('ERROR')
@@ -34,6 +48,8 @@ parser.add_argument('--max_epochs', type=int, default=20, help='Maximum number o
 parser.add_argument('--dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images", help='Path to the dataset')
 parser.add_argument('--performer_data_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json", help='Path to the performer data JSON file')
 parser.add_argument('--output_dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy", help='Path to save the output dataset with metadata')
+parser.add_argument('--model_save_path', type=str, default="performer_recognition_model", help='Path to save the trained model')
+parser.add_argument('--checkpoint_dir', type=str, default='model_checkpoints', help='Directory to save model checkpoints')
 args = parser.parse_args()
 
 # Use parsed arguments
@@ -42,6 +58,11 @@ MAX_EPOCHS = args.max_epochs
 dataset_path = args.dataset_path
 performer_data_path = args.performer_data_path
 output_dataset_path = args.output_dataset_path
+model_save_path = args.model_save_path  # Add this line
+checkpoint_dir = args.checkpoint_dir
+os.makedirs(checkpoint_dir, exist_ok=True)
+best_model_path = os.path.join(checkpoint_dir, 'best_model')
+latest_model_path = os.path.join(checkpoint_dir, 'latest_model')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -147,30 +168,45 @@ def log_memory_usage(message=""):
 
 
 # Add memory logging before and after loading images
-def safe_load_img_with_timeout(path, target_size, timeout=5):
+def safe_load_img_with_timeout(path, target_size, timeout=2):  # Reduced timeout to 2 seconds
     def load_image():
-        log_memory_usage("Before loading image")  # Log memory usage before loading image
-        if is_image_corrupt(path):
-            return np.zeros((target_size[0], target_size[1], 3))
         try:
-            img = load_img(path, target_size=target_size)
-            img_array = img_to_array(img) / 255.0  # Normalize and ensure shape
-            if img_array.shape != (224, 224, 3):  # Add explicit check
-                img_array = np.resize(img_array, (224, 224, 3))
-            log_memory_usage("After loading image")  # Log memory usage after loading image
+            # Try using cv2 first (faster)
+            img = cv2.imread(path)
+            if img is not None:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                img = cv2.resize(img, (target_size[1], target_size[0]))
+                img_array = img.astype(np.float32) / 255.0
+                return img_array
+            
+            # Fallback to PIL if cv2 fails
+            img = Image.open(path)
+            img = img.resize((target_size[1], target_size[0]))
+            img_array = img_to_array(img) / 255.0
             return img_array
-        except UnidentifiedImageError:
-            return np.zeros((target_size[0], 224, 3))
+            
         except Exception as e:
-            logging.error(f"Error loading image: {e}")
+            logging.warning(f"Error loading image {path}: {str(e)}")
             return np.zeros((target_size[0], target_size[1], 3))
+
+    # Use cache to avoid reloading the same image
+    cache_str = cache_key(path)
+    if hasattr(safe_load_img_with_timeout, 'cache') and cache_str in safe_load_img_with_timeout.cache:
+        return safe_load_img_with_timeout.cache[cache_str]
 
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(load_image)
-            return future.result(timeout=timeout)
+            result = future.result(timeout=timeout)
+            
+            # Cache the result
+            if not hasattr(safe_load_img_with_timeout, 'cache'):
+                safe_load_img_with_timeout.cache = {}
+            safe_load_img_with_timeout.cache[cache_str] = result
+            
+            return result
     except TimeoutError:
-        logging.error(f"Timeout loading image: {path}")
+        logging.warning(f"Timeout loading image: {path}")
         return np.zeros((target_size[0], target_size[1], 3))
 
 
@@ -223,7 +259,7 @@ logging.info(f"Dataset loaded. Total items: {len(dataset)}")
 # Create a mapping from performer IDs to integer labels
 logging.info("Creating mapping from performer IDs to integer labels.")
 performer_ids = [performer['id'] for performer in performer_data]
-id_to_index = {id: index for index, id in enumerate(np.unique(performer_ids))}
+id_to_index = {performer_id: i for i, performer_id in enumerate(np.unique(performer_ids))}
 logging.info(f"Mapping created. Number of unique performer IDs: {len(id_to_index)}")
 
 # Create a list of image paths and labels
@@ -283,18 +319,17 @@ logging.info(f"Total images: {total_images}, Processed images: {processed_images
 def load_image_and_label(image_path, label):
     def _load_image_and_label(image_path, label):
         try:
-            # Ensure image_path is a valid string and label is a scalar
             image_path = image_path.numpy().decode('utf-8') if isinstance(image_path.numpy(), bytes) else str(image_path.numpy())
             label = label.numpy()
             if isinstance(label, np.ndarray) and label.size == 1:
-                label = label.item()  # Ensure label is a scalar
+                label = label.item()
 
-            # Load and preprocess the image
-            image = safe_load_img(image_path, target_size=(224, 224))
-            
-            # Validate image shape
-            if not np.all(image.shape == (224, 224, 3)):
-                raise ValueError("Image shape mismatch")
+            # Load and preprocess the image with retry mechanism
+            for attempt in range(2):  # Try twice
+                image = safe_load_img(image_path, target_size=(224, 224))
+                if not np.all(image == 0):  # If not a blank image
+                    break
+                time.sleep(0.1)  # Short delay before retry
 
             return image, label
 
@@ -344,6 +379,12 @@ def create_batched_dataset(image_paths, labels, batch_size):
 
     # Create a TensorFlow Dataset
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
+    
+    # Add shuffling before mapping
+    dataset = dataset.shuffle(buffer_size=5000)
+    
+    # Add caching after shuffling
+    dataset = dataset.cache()
 
     # Map over dataset
     dataset = dataset.map(
@@ -415,32 +456,182 @@ data_augmentation = keras.Sequential(
 )
 logging.info("Data augmentation setup complete.")
 
-# Add logic to load the model if it exists
-model_save_path = "performer_recognition_model"
-if os.path.exists(model_save_path):
-    logging.info("Existing model_save_path found, but it may be incompatible. Please remove or rename it.")
-    logging.info("Building a new model instead.")
-
 class HFViTLogitsLayer(tf.keras.layers.Layer):
     def __init__(self, base_model):
-        super().__init__()
-        self.base_model = base_model
+        super(HFViTLogitsLayer, self).__init__(name='HFViTLogitsLayer')
+        self.base_model = base_model  # No need for self.input_spec here
 
     def call(self, inputs):
         return self.base_model({"pixel_values": inputs}).logits
 
-model = models.Sequential([
-    data_augmentation,
-    layers.Input(shape=(224, 224, 3)),
-    layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
-    HFViTLogitsLayer(base_model),
-    layers.Dense(512, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(256, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(len(id_to_index), activation='softmax')
-])
-logging.info("Custom model built.")
+    def get_config(self):
+        config = super().get_config()
+        return config  # Ensure no `input_spec` is saved in config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+class FixInputSpecSequential(tf.keras.Sequential):
+    """Custom Sequential model that handles input_spec properly."""
+    
+    def __init__(self, *args, **kwargs):
+        # Remove name before passing to parent
+        name = kwargs.pop('name', None)
+        super().__init__(*args, **kwargs)
+        if name:
+            self._name = name
+            
+        # Set dtype policy after initialization
+        self._dtype_policy = tf.keras.mixed_precision.global_policy()
+        self._dtype = self._dtype_policy.compute_dtype
+
+    def get_config(self):
+        config = super().get_config()
+        if "input_spec" in config:
+            del config["input_spec"]
+        return config
+
+    @classmethod
+    def from_config(cls, config, custom_objects=None):
+        if "input_spec" in config:
+            del config["input_spec"]
+        return super().from_config(config, custom_objects=custom_objects)
+
+# Replace the model loading code
+def load_saved_model(model_path, custom_objects):
+    """Load model with proper error handling and dtype policy initialization."""
+    try:
+        # First try loading normally
+        model = tf.keras.models.load_model(model_path, 
+                                       custom_objects=custom_objects, 
+                                       compile=False)
+        return model
+    except Exception as e:
+        logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
+        try:
+            # Create model architecture
+            temp_model = FixInputSpecSequential([
+                data_augmentation,
+                layers.Input(shape=(224, 224, 3)),
+                layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
+                HFViTLogitsLayer(base_model),
+                layers.Dense(512, activation='relu'),
+                layers.Dropout(0.5),
+                layers.Dense(256, activation='relu'),
+                layers.Dropout(0.5),
+                layers.Dense(len(id_to_index), activation='softmax')
+            ])
+            
+            # Try to load weights directly from the saved model directory
+            try:
+                weights_path = os.path.join(model_path, 'variables', 'variables')
+                temp_model.load_weights(weights_path)
+            except:
+                # If that fails, try loading the whole directory as weights
+                temp_model.load_weights(model_path)
+            
+            return temp_model
+        except Exception as e2:
+            logging.error(f"Both loading methods failed: {str(e2)}")
+            return None
+
+# Update custom objects
+custom_objects = {
+    'HFViTLogitsLayer': HFViTLogitsLayer,
+    'FixInputSpecSequential': FixInputSpecSequential,
+    'LayerNormalization': tf.keras.layers.LayerNormalization,
+    'Conv2D': tf.keras.layers.Conv2D,
+    'Dense': tf.keras.layers.Dense
+}
+
+def find_latest_checkpoint():
+    """Find the latest checkpoint in the checkpoint directory."""
+    if not os.path.exists(checkpoint_dir):
+        return None
+    
+    checkpoints = []
+    for dirname in os.listdir(checkpoint_dir):
+        if dirname.startswith('model_epoch_'):
+            try:
+                epoch_num = int(dirname.split('_')[-1])
+                model_path = os.path.join(checkpoint_dir, dirname)
+                if os.path.exists(os.path.join(model_path, 'saved_model.pb')):
+                    checkpoints.append((epoch_num, model_path))
+            except ValueError:
+                continue
+    
+    if not checkpoints:
+        return None
+    
+    # Sort by epoch number and get the latest
+    latest_checkpoint = max(checkpoints, key=lambda x: x[0])[1]
+    logging.info(f"Found latest checkpoint: {latest_checkpoint}")
+    return latest_checkpoint
+
+# Replace the model loading section
+logging.info("Loading saved model and stripping input_spec.")
+model = None
+
+# Try loading the latest checkpoint first
+latest_checkpoint = find_latest_checkpoint()
+if (latest_checkpoint):
+    try:
+        model = load_saved_model(latest_checkpoint, custom_objects)
+        if model is not None:
+            logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
+            # Compile the loaded model
+            model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
+                        loss='sparse_categorical_crossentropy',
+                        metrics=['accuracy'])
+            logging.info("Loaded checkpoint model compiled successfully.")
+    except Exception as e:
+        logging.warning(f"Failed to load checkpoint model: {e}")
+        model = None
+
+# If no checkpoint model was loaded, try the best model
+if model is None and os.path.exists(best_model_path):
+    try:
+        model = load_saved_model(best_model_path, custom_objects)
+        if model is not None:
+            logging.info("Loaded best performing model.")
+            model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
+                        loss='sparse_categorical_crossentropy',
+                        metrics=['accuracy'])
+            logging.info("Loaded model compiled successfully.")
+    except Exception as e:
+        logging.warning(f"Failed to load best model: {e}")
+        model = None
+
+# Only create a new model if no existing model could be loaded
+if model is None:
+    logging.info("No existing model found. Creating new model.")
+    model = FixInputSpecSequential([
+        data_augmentation,
+        layers.Input(shape=(224, 224, 3)),
+        layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
+        HFViTLogitsLayer(base_model),
+        layers.Dense(512, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(256, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(len(id_to_index), activation='softmax')
+    ])
+    # Compile the new model
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy'])
+    logging.info("New model created and compiled successfully.")
+
+# Build the model with an input shape (only needed for new models)
+if not model.built:
+    model.build((None, 224, 224, 3))
+    logging.info("Model built with input shape.")
+
+# Save the initial model if it's new
+if not os.path.exists(model_save_path):
+    model.save(model_save_path, save_format='tf')
+    logging.info(f"Initial model saved at {model_save_path}")
 
 # Adjust the learning rate and compile the model
 logging.info("Compiling the model.")
@@ -589,22 +780,69 @@ class DebugCallback(tf.keras.callbacks.Callback):
         mem_usage = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
         logging.info(f"Epoch {epoch+1} took {elapsed:.2f}s, memory usage ~ {mem_usage:.1f} MB")
 
+# Add LoggingModelCheckpoint class definition
+class LoggingModelCheckpoint(ModelCheckpoint):
+    """Custom ModelCheckpoint class that adds logging"""
+    def __init__(self, filepath, **kwargs):
+        super().__init__(filepath, **kwargs)
+        self.filepath = filepath
+
+    def on_epoch_end(self, epoch, logs=None):
+        super().on_epoch_end(epoch, logs)
+        logging.info(f"Model checkpoint saved at epoch {epoch + 1}")
+
 # Add learning rate scheduler
 def lr_scheduler(epoch, lr):
     if epoch > 10:
         lr = lr * 0.1
     return lr
 
-# Add callbacks
-tensorboard_callback = TensorBoard(log_dir='./logs')
-class LoggingModelCheckpoint(ModelCheckpoint):
-    def on_epoch_end(self, epoch, logs=None):
-        super().on_epoch_end(epoch, logs)
-        logging.info(f"Model successfully saved at the end of epoch {epoch + 1}")
+# Add early stopping callback definition before the callbacks list
+early_stopping_callback = EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    verbose=1,
+    restore_best_weights=True
+)
 
-checkpoint_callback = LoggingModelCheckpoint(filepath=model_save_path, save_best_only=False, save_freq='epoch')
-early_stopping_callback = EarlyStopping(monitor='val_loss', patience=5)
+# Add learning rate scheduler callback
 lr_scheduler_callback = LearningRateScheduler(lr_scheduler)
+
+logging.info("Adding callbacks.")
+progress_bar_callback = TQDMProgressBar(steps_per_epoch=steps_per_epoch)
+debug_callback = DebugCallback()
+tensorboard_callback = TensorBoard(
+    log_dir='./logs',
+    histogram_freq=1,
+    write_graph=True,
+    write_images=True,
+    update_freq='batch'
+)
+checkpoint_callback = LoggingModelCheckpoint(
+    filepath=os.path.join(checkpoint_dir, 'model_epoch_{epoch:02d}'),
+    save_best_only=False,
+    save_freq='epoch',
+    save_format='tf',
+    verbose=1  # Add verbose output
+)
+best_checkpoint_callback = ModelCheckpoint(
+    filepath=best_model_path,
+    save_best_only=True,
+    monitor='val_loss',
+    mode='min',
+    save_format='tf'
+)
+
+callbacks = [
+    progress_bar_callback,
+    debug_callback,
+    tensorboard_callback,
+    checkpoint_callback,
+    best_checkpoint_callback,
+    early_stopping_callback,
+    lr_scheduler_callback
+]
+logging.info("Callbacks added.")
 
 # Add memory logging before and after model training
 try:
@@ -694,3 +932,13 @@ if val_size > 0:
         logging.error(f"Error during model evaluation: {e}")
 else:
     logging.warning("Validation dataset is empty. Skipping evaluation.")
+
+# Add cache for processed images
+@lru_cache(maxsize=100000)
+def cache_key(path):
+    """Generate a unique cache key for an image path based on path and modification time."""
+    try:
+        mtime = os.path.getmtime(path)
+        return f"{path}_{mtime}"
+    except OSError:
+        return path  # Fallback to just the path if can't get mtime
