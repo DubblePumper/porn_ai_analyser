@@ -7,4 +7,3 @@ performer_recognition_model.keras
 /performer_recognition_model/
 /app/datasets/pornstar_images.zip
 /app/model_checkpoints/
-/app/model_checkpoints
