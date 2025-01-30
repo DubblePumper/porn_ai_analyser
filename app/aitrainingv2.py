@@ -28,6 +28,9 @@ from tensorflow.keras import mixed_precision
 from functools import lru_cache
 import cv2
 
+# Global Constants
+ENABLE_IMAGE_CACHE = False  # Set to False to disable image caching
+
 # Move cache_key definition to the top, after imports
 @lru_cache(maxsize=100000)
 def cache_key(path):
@@ -43,8 +46,8 @@ tf.get_logger().setLevel('ERROR')
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Train an AI model to recognize a person inside an image.')
-parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')  # Reduced batch size
-parser.add_argument('--max_epochs', type=int, default=20, help='Maximum number of epochs for training')
+parser.add_argument('--batch_size', type=int, default=32, help='Reduce batch size to help avoid OOM')  # Reduced batch size
+parser.add_argument('--max_epochs', type=int, default=50, help='Increase epoch count to 50')
 parser.add_argument('--dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images", help='Path to the dataset')
 parser.add_argument('--performer_data_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json", help='Path to the performer data JSON file')
 parser.add_argument('--output_dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy", help='Path to save the output dataset with metadata')
@@ -168,6 +171,8 @@ def log_memory_usage(message=""):
 
 
 # Add memory logging before and after loading images
+cached_images_bar = tqdm(desc="Images cached", unit="image")
+
 def safe_load_img_with_timeout(path, target_size, timeout=2):  # Reduced timeout to 2 seconds
     def load_image():
         try:
@@ -189,20 +194,25 @@ def safe_load_img_with_timeout(path, target_size, timeout=2):  # Reduced timeout
             logging.warning(f"Error loading image {path}: {str(e)}")
             return np.zeros((target_size[0], target_size[1], 3))
 
-    # Use cache to avoid reloading the same image
-    cache_str = cache_key(path)
-    if hasattr(safe_load_img_with_timeout, 'cache') and cache_str in safe_load_img_with_timeout.cache:
-        return safe_load_img_with_timeout.cache[cache_str]
+    # Only use cache if enabled
+    if ENABLE_IMAGE_CACHE:
+        cache_str = cache_key(path)
+        if hasattr(safe_load_img_with_timeout, 'cache') and cache_str in safe_load_img_with_timeout.cache:
+            return safe_load_img_with_timeout.cache[cache_str]
 
     try:
+        # Reduce max_workers
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(load_image)
             result = future.result(timeout=timeout)
             
-            # Cache the result
-            if not hasattr(safe_load_img_with_timeout, 'cache'):
-                safe_load_img_with_timeout.cache = {}
-            safe_load_img_with_timeout.cache[cache_str] = result
+            # Only cache if enabled
+            if ENABLE_IMAGE_CACHE:
+                if not hasattr(safe_load_img_with_timeout, 'cache'):
+                    safe_load_img_with_timeout.cache = {}
+                if cache_str not in safe_load_img_with_timeout.cache:
+                    safe_load_img_with_timeout.cache[cache_str] = result
+                    cached_images_bar.update(1)
             
             return result
     except TimeoutError:
@@ -439,19 +449,25 @@ base_model = TFViTForImageClassification.from_pretrained("google/vit-base-patch1
 feature_extractor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224")
 logging.info("Base model and feature extractor loaded.")
 
-# Bevries alle lagen behalve de top lagen
+logging.info(f"Number of layers in the base model encoder: {len(base_model.vit.encoder.layer)}")
+
+# Freeze fewer layers (unfreeze the last four)
 logging.info("Freezing all layers except the top layers.")
-for layer in base_model.vit.encoder.layer[:-1]:  # Bevries alle lagen behalve de laatste encoderlaag
+for layer in base_model.vit.encoder.layer[:-6]:
     layer.trainable = False
+for i, layer in enumerate(base_model.vit.encoder.layer):
+    logging.info(f"Layer {i}: Trainable = {layer.trainable}")
 logging.info("Layers frozen.")
 
-# Data Augmentation
+# Add RandomBrightness and RandomContrast to the data augmentation
 logging.info("Setting up data augmentation.")
 data_augmentation = keras.Sequential(
     [
         layers.RandomFlip("horizontal_and_vertical"),
         layers.RandomRotation(0.2),
         layers.RandomZoom(0.2),
+        layers.RandomBrightness(factor=0.2),
+        layers.RandomContrast(factor=0.2),
     ]
 )
 logging.info("Data augmentation setup complete.")
@@ -517,9 +533,9 @@ def load_saved_model(model_path, custom_objects):
                 layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
                 HFViTLogitsLayer(base_model),
                 layers.Dense(512, activation='relu'),
-                layers.Dropout(0.5),
+                layers.Dropout(0.3),  # Reduced dropout
                 layers.Dense(256, activation='relu'),
-                layers.Dropout(0.5),
+                layers.Dropout(0.3),  # Reduced dropout
                 layers.Dense(len(id_to_index), activation='softmax')
             ])
             
@@ -545,21 +561,28 @@ custom_objects = {
     'Dense': tf.keras.layers.Dense
 }
 
+# ...existing code...
 def find_latest_checkpoint():
-    """Find the latest checkpoint in the checkpoint directory."""
-    if not os.path.exists(checkpoint_dir):
-        return None
     
+    """Find the latest checkpoint in the checkpoint directory or logs directory."""
+    directories = [checkpoint_dir, './logs']
     checkpoints = []
-    for dirname in os.listdir(checkpoint_dir):
-        if dirname.startswith('model_epoch_'):
-            try:
-                epoch_num = int(dirname.split('_')[-1])
-                model_path = os.path.join(checkpoint_dir, dirname)
-                if os.path.exists(os.path.join(model_path, 'saved_model.pb')):
-                    checkpoints.append((epoch_num, model_path))
-            except ValueError:
-                continue
+    
+    for directory in directories:
+        logging.info(f"Checking directory: {directory}")
+        if not os.path.exists(directory):
+            continue
+        
+        for dirname in os.listdir(directory):
+            checkpoint_path = os.path.join(directory, dirname)
+            if dirname.startswith('model_epoch_') and os.path.isdir(checkpoint_path):
+                try:
+                    epoch_num = int(dirname.split('_')[-1])
+                    if os.path.exists(os.path.join(checkpoint_path, 'saved_model.pb')):
+                        checkpoints.append((epoch_num, checkpoint_path))
+                        logging.info(f"Found checkpoint: {checkpoint_path}")
+                except ValueError:
+                    continue
     
     if not checkpoints:
         return None
@@ -569,6 +592,7 @@ def find_latest_checkpoint():
     logging.info(f"Found latest checkpoint: {latest_checkpoint}")
     return latest_checkpoint
 
+logging.info(f"=====================================================================")
 # Replace the model loading section
 logging.info("Loading saved model and stripping input_spec.")
 model = None
@@ -612,16 +636,18 @@ if model is None:
         layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
         HFViTLogitsLayer(base_model),
         layers.Dense(512, activation='relu'),
-        layers.Dropout(0.5),
+        layers.Dropout(0.1),  # Reduced dropout
         layers.Dense(256, activation='relu'),
-        layers.Dropout(0.5),
+        layers.Dropout(0.1),  # Reduced dropout
         layers.Dense(len(id_to_index), activation='softmax')
     ])
     # Compile the new model
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.00001),
                 loss='sparse_categorical_crossentropy',
                 metrics=['accuracy'])
     logging.info("New model created and compiled successfully.")
+    
+logging.info(f"=====================================================================")
 
 # Build the model with an input shape (only needed for new models)
 if not model.built:
@@ -808,6 +834,14 @@ early_stopping_callback = EarlyStopping(
 # Add learning rate scheduler callback
 lr_scheduler_callback = LearningRateScheduler(lr_scheduler)
 
+class CustomTensorBoardCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        for metric, value in logs.items():
+            tf.summary.scalar(metric, value, step=epoch)
+        tf.summary.flush()
+
+# ...existing code...
 logging.info("Adding callbacks.")
 progress_bar_callback = TQDMProgressBar(steps_per_epoch=steps_per_epoch)
 debug_callback = DebugCallback()
@@ -816,10 +850,13 @@ tensorboard_callback = TensorBoard(
     histogram_freq=1,
     write_graph=True,
     write_images=True,
-    update_freq='batch'
+    update_freq='batch',
+    profile_batch=0,
+    write_steps_per_second=True
 )
+custom_tensorboard_callback = CustomTensorBoardCallback()
 checkpoint_callback = LoggingModelCheckpoint(
-    filepath=os.path.join(checkpoint_dir, 'model_epoch_{epoch:02d}'),
+    filepath=os.path.join('./logs', 'model_epoch_{epoch:02d}'),
     save_best_only=False,
     save_freq='epoch',
     save_format='tf',
@@ -837,12 +874,14 @@ callbacks = [
     progress_bar_callback,
     debug_callback,
     tensorboard_callback,
+    custom_tensorboard_callback,
     checkpoint_callback,
     best_checkpoint_callback,
     early_stopping_callback,
     lr_scheduler_callback
 ]
 logging.info("Callbacks added.")
+# ...existing code...
 
 # Add memory logging before and after model training
 try:
