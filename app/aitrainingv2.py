@@ -46,7 +46,7 @@ tf.get_logger().setLevel('ERROR')
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Train an AI model to recognize a person inside an image.')
-parser.add_argument('--batch_size', type=int, default=32, help='Reduce batch size to help avoid OOM')  # Reduced batch size
+parser.add_argument('--batch_size', type=int, default=16, help='Further reduce batch size to help avoid OOM')  # Reduced batch size
 parser.add_argument('--max_epochs', type=int, default=50, help='Increase epoch count to 50')
 parser.add_argument('--dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images", help='Path to the dataset')
 parser.add_argument('--performer_data_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json", help='Path to the performer data JSON file')
@@ -663,7 +663,11 @@ if not os.path.exists(model_save_path):
 logging.info("Compiling the model.")
 model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
               loss='sparse_categorical_crossentropy',
-              metrics=['accuracy'])
+              metrics=[
+                  'accuracy',
+                  tf.keras.metrics.Precision(name='precision'),
+                  tf.keras.metrics.Recall(name='recall'),
+              ])
 logging.info("Model compilation complete.")
 
 # Count label occurrences
@@ -841,6 +845,15 @@ class CustomTensorBoardCallback(tf.keras.callbacks.Callback):
             tf.summary.scalar(metric, value, step=epoch)
         tf.summary.flush()
 
+class F1ScoreCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        precision = logs.get('precision')
+        recall = logs.get('recall')
+        if precision and recall and (precision + recall) > 0:
+            f1_score = 2 * (precision * recall) / (precision + recall)
+            logs['f1_score'] = f1_score
+            logging.info(f"Epoch {epoch+1} - F1 Score: {f1_score:.4f}")
+
 # ...existing code...
 logging.info("Adding callbacks.")
 progress_bar_callback = TQDMProgressBar(steps_per_epoch=steps_per_epoch)
@@ -878,7 +891,8 @@ callbacks = [
     checkpoint_callback,
     best_checkpoint_callback,
     early_stopping_callback,
-    lr_scheduler_callback
+    lr_scheduler_callback,
+    F1ScoreCallback()
 ]
 logging.info("Callbacks added.")
 # ...existing code...
