@@ -27,6 +27,9 @@ import shutil
 from tensorflow.keras import mixed_precision
 from functools import lru_cache
 import cv2
+from sklearn.metrics import precision_score, recall_score, f1_score
+import math
+import tensorflow_addons as tfa
 
 # Global Constants
 ENABLE_IMAGE_CACHE = False  # Set to False to disable image caching
@@ -63,6 +66,8 @@ performer_data_path = args.performer_data_path
 output_dataset_path = args.output_dataset_path
 model_save_path = args.model_save_path  # Add this line
 checkpoint_dir = args.checkpoint_dir
+LEARNING_RATE = 0.0005  # Further reduced
+UNFREEZE_COUNT = 10
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
 latest_model_path = os.path.join(checkpoint_dir, 'latest_model')
@@ -449,15 +454,34 @@ base_model = TFViTForImageClassification.from_pretrained("google/vit-base-patch1
 feature_extractor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224")
 logging.info("Base model and feature extractor loaded.")
 
+logging.info(f"=====================================================================")
 logging.info(f"Number of layers in the base model encoder: {len(base_model.vit.encoder.layer)}")
 
 # Freeze fewer layers (unfreeze the last four)
 logging.info("Freezing all layers except the top layers.")
-for layer in base_model.vit.encoder.layer[:-6]:
+# Log initial state
+total_layers = len(base_model.vit.encoder.layer)
+logging.info(f"Total encoder layers: {total_layers}")
+logging.info(f"Unfreezing last {UNFREEZE_COUNT} layers")
+
+# Freeze all encoder layers first
+frozen_count = 0
+for layer in base_model.vit.encoder.layer:
     layer.trainable = False
-for i, layer in enumerate(base_model.vit.encoder.layer):
-    logging.info(f"Layer {i}: Trainable = {layer.trainable}")
-logging.info("Layers frozen.")
+    frozen_count += 1
+logging.info(f"Initially froze {frozen_count} layers")
+
+# Unfreeze only the last UNFREEZE_COUNT layers
+start_idx = total_layers - UNFREEZE_COUNT
+unfrozen_count = 0
+for i in range(start_idx, total_layers):
+    base_model.vit.encoder.layer[i].trainable = True
+    unfrozen_count += 1
+    logging.info(f"Unfroze layer {i}")
+
+logging.info(f"Final layer status: {frozen_count - unfrozen_count} frozen, {unfrozen_count} unfrozen")
+logging.info(f"Layer freezing complete")
+logging.info(f"=====================================================================")
 
 # Add RandomBrightness and RandomContrast to the data augmentation
 logging.info("Setting up data augmentation.")
@@ -512,7 +536,7 @@ class FixInputSpecSequential(tf.keras.Sequential):
     def from_config(cls, config, custom_objects=None):
         if "input_spec" in config:
             del config["input_spec"]
-        return super().from_config(config, custom_objects=custom_objects)
+        return super().from_config(config, custom_objects)
 
 # Replace the model loading code
 def load_saved_model(model_path, custom_objects):
@@ -605,8 +629,8 @@ if (latest_checkpoint):
         if model is not None:
             logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
             # Compile the loaded model
-            model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
-                        loss='sparse_categorical_crossentropy',
+            model.compile(optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+                        loss=tfa.losses.SigmoidFocalCrossEntropy(gamma=2.0),
                         metrics=['accuracy'])
             logging.info("Loaded checkpoint model compiled successfully.")
     except Exception as e:
@@ -619,8 +643,8 @@ if model is None and os.path.exists(best_model_path):
         model = load_saved_model(best_model_path, custom_objects)
         if model is not None:
             logging.info("Loaded best performing model.")
-            model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
-                        loss='sparse_categorical_crossentropy',
+            model.compile(optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+                        loss=tfa.losses.SigmoidFocalCrossEntropy(gamma=2.0),
                         metrics=['accuracy'])
             logging.info("Loaded model compiled successfully.")
     except Exception as e:
@@ -635,18 +659,45 @@ if model is None:
         layers.Input(shape=(224, 224, 3)),
         layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
         HFViTLogitsLayer(base_model),
+        layers.BatchNormalization(),  # Add BatchNorm
         layers.Dense(512, activation='relu'),
-        layers.Dropout(0.1),  # Reduced dropout
+        layers.BatchNormalization(),  # Add BatchNorm
+        layers.Dropout(0.1),
         layers.Dense(256, activation='relu'),
-        layers.Dropout(0.1),  # Reduced dropout
-        layers.Dense(len(id_to_index), activation='softmax')
+        layers.BatchNormalization(),  # Add BatchNorm
+        layers.Dropout(0.1),
+        layers.Dense(len(id_to_index))  # Remove softmax activation here
     ])
-    # Compile the new model
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.00001),
-                loss='sparse_categorical_crossentropy',
-                metrics=['accuracy'])
-    logging.info("New model created and compiled successfully.")
     
+    # Compile with sparse categorical crossentropy and label smoothing
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=LEARNING_RATE,
+            clipnorm=1.0
+        ),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True,  # Keep this as True since we're using raw logits
+            reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+        ),
+        metrics=['accuracy']
+    )
+    logging.info("New model created and compiled successfully.")
+
+# Update the model compilation after loading
+else:
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=LEARNING_RATE,
+            clipnorm=1.0,
+            epsilon=1e-7
+        ),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True,  # Keep this as True
+            reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+        ),
+        metrics=['accuracy']
+    )
+
 logging.info(f"=====================================================================")
 
 # Build the model with an input shape (only needed for new models)
@@ -661,13 +712,18 @@ if not os.path.exists(model_save_path):
 
 # Adjust the learning rate and compile the model
 logging.info("Compiling the model.")
-model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001),
-              loss='sparse_categorical_crossentropy',
-              metrics=[
-                  'accuracy',
-                  tf.keras.metrics.Precision(name='precision'),
-                  tf.keras.metrics.Recall(name='recall'),
-              ])
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=LEARNING_RATE,
+        clipnorm=1.0,  # Add gradient clipping
+        epsilon=1e-7   # Increase epsilon for better numerical stability
+    ),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(
+        from_logits=True,  # Change to True since we're using raw logits
+        reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+    ),
+    metrics=['accuracy']
+)
 logging.info("Model compilation complete.")
 
 # Count label occurrences
@@ -689,6 +745,12 @@ class_weights = {label: weight for label, weight in class_weights.items() if lab
 # Normalize class weights to ensure they are within a reasonable range
 max_weight = max(class_weights.values())
 class_weights = {label: weight / max_weight for label, weight in class_weights.items()}
+
+# Clamp the maximum class weight to 10.0
+class_weights = {label: min(weight, 10.0) for label, weight in class_weights.items()}
+
+# Apply log-based scaling to class weights
+class_weights = {label: 1 + math.log1p(weight) for label, weight in class_weights.items()}
 
 # Summarize class weights
 min_weight = min(class_weights.values())
@@ -765,12 +827,33 @@ for x, y in train_dataset.take(1):
     assert y is not None, "Label data contains None."
     logging.info(f"Sample image: {x.shape}, Label: {y}")
 
+
+# Add check_class_weights function
+def check_class_weights(class_weights):
+    logging.info(f"=====================================================================")
+    if not class_weights:
+        logging.warning("No class weights found.")
+        return
+    min_w = min(class_weights.values())
+    max_w = max(class_weights.values())
+    ratio = max_w / min_w if min_w > 0 else float('inf')
+    logging.info(f"Class weights range from {min_w:.3f} to {max_w:.3f}, ratio={ratio:.3f}")
+    if ratio > 10:
+        logging.warning("Class weight imbalance is very high, some classes may be undertrained.")
+
+# Check class weights before training
+logging.info("Checking class weights before training.")
+check_class_weights(class_weights)
+logging.info(f"=====================================================================")
+
 # Check dataset consistency for shape and type
 logging.info("Checking dataset consistency for shape and type.")
 for images, labels in train_dataset.take(1):
     assert images is not None and labels is not None, "Dataset contains None."
     logging.info(f"Train batch shapes: {images.shape}, {labels.shape}")
+    
 for images, labels in val_dataset.take(1):
+    logging.info(f"Doing some weird things....")
     assert images is not None and labels is not None, "Dataset contains None."
     logging.info(f"Validation batch shapes: {images.shape}, {labels.shape}")
 
@@ -845,16 +928,6 @@ class CustomTensorBoardCallback(tf.keras.callbacks.Callback):
             tf.summary.scalar(metric, value, step=epoch)
         tf.summary.flush()
 
-class F1ScoreCallback(tf.keras.callbacks.Callback):
-    def on_epoch_end(self, epoch, logs=None):
-        precision = logs.get('precision')
-        recall = logs.get('recall')
-        if precision and recall and (precision + recall) > 0:
-            f1_score = 2 * (precision * recall) / (precision + recall)
-            logs['f1_score'] = f1_score
-            logging.info(f"Epoch {epoch+1} - F1 Score: {f1_score:.4f}")
-
-# ...existing code...
 logging.info("Adding callbacks.")
 progress_bar_callback = TQDMProgressBar(steps_per_epoch=steps_per_epoch)
 debug_callback = DebugCallback()
@@ -883,6 +956,33 @@ best_checkpoint_callback = ModelCheckpoint(
     save_format='tf'
 )
 
+class MetricsCallback(tf.keras.callbacks.Callback):
+    def __init__(self, val_dataset):
+        super().__init__()
+        self.val_dataset = val_dataset  # Fix: use the parameter instead of self.val_dataset
+
+    def on_epoch_end(self, epoch, logs=None):
+        y_true_all = []
+        y_pred_all = []
+        for images, labels in self.val_dataset:
+            preds = self.model.predict(images)
+            # Apply softmax to the logits
+            preds = tf.nn.softmax(preds)
+            y_pred_all.extend(np.argmax(preds, axis=1))
+            y_true_all.extend(labels.numpy())
+        precision_val = precision_score(y_true_all, y_pred_all, average='macro')
+        recall_val = recall_score(y_true_all, y_pred_all, average='macro')
+        f1_val = f1_score(y_true_all, y_pred_all, average='macro')
+        logging.info(f"Epoch {epoch+1} - Precision: {precision_val:.4f}, Recall: {recall_val:.4f}, F1: {f1_val:.4f}")
+
+# Add gradient norm logging callback
+class GradientLoggingCallback(tf.keras.callbacks.Callback):
+    def on_batch_end(self, batch, logs=None):
+        if batch % 100 == 0:  # Log every 100 batches
+            grads = [layer.weights[0] for layer in self.model.trainable_layers if layer.weights]
+            grad_norms = [tf.norm(grad).numpy() for grad in grads]
+            logging.info(f"Batch {batch} - Gradient norms: {grad_norms}")
+
 callbacks = [
     progress_bar_callback,
     debug_callback,
@@ -892,10 +992,13 @@ callbacks = [
     best_checkpoint_callback,
     early_stopping_callback,
     lr_scheduler_callback,
-    F1ScoreCallback()
+    MetricsCallback(val_dataset),
+    GradientLoggingCallback()
 ]
 logging.info("Callbacks added.")
-# ...existing code...
+
+
+
 
 # Add memory logging before and after model training
 try:
@@ -995,3 +1098,16 @@ def cache_key(path):
         return f"{path}_{mtime}"
     except OSError:
         return path  # Fallback to just the path if can't get mtime
+
+if history is not None and 'accuracy' in history.history and 'val_accuracy' in history.history:
+    final_train_acc = history.history['accuracy'][-1]
+    final_val_acc = history.history['val_accuracy'][-1]
+    diff = final_train_acc - final_val_acc
+    logging.info(f"Final training accuracy: {final_train_acc:.4f}")
+    logging.info(f"Final validation accuracy: {final_val_acc:.4f}")
+    logging.info(f"Accuracy difference (train - val): {diff:.4f}")
+    if diff > 0.1:
+        logging.info("Potential overfitting detected. Consider regularization or early stopping.")
+
+
+
