@@ -1,5 +1,5 @@
 import os
-
+# tensorboard --logdir=./logs
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
 
@@ -66,7 +66,7 @@ performer_data_path = args.performer_data_path
 output_dataset_path = args.output_dataset_path
 model_save_path = args.model_save_path  # Add this line
 checkpoint_dir = args.checkpoint_dir
-LEARNING_RATE = 0.0005  # Further reduced
+LEARNING_RATE = 0.00005  # Further reduced
 UNFREEZE_COUNT = 10
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
@@ -538,6 +538,23 @@ class FixInputSpecSequential(tf.keras.Sequential):
             del config["input_spec"]
         return super().from_config(config, custom_objects)
 
+# Define custom_objects before using load_saved_model
+custom_objects = {
+    'HFViTLogitsLayer': HFViTLogitsLayer,
+    'FixInputSpecSequential': FixInputSpecSequential,
+    'LayerNormalization': tf.keras.layers.LayerNormalization,
+    'Conv2D': tf.keras.layers.Conv2D,
+    'Dense': tf.keras.layers.Dense,
+    'Dropout': tf.keras.layers.Dropout,
+    'BatchNormalization': tf.keras.layers.BatchNormalization,
+    'Lambda': tf.keras.layers.Lambda,
+    'RandomFlip': tf.keras.layers.RandomFlip,
+    'RandomRotation': tf.keras.layers.RandomRotation,
+    'RandomZoom': tf.keras.layers.RandomZoom,
+    'RandomBrightness': tf.keras.layers.RandomBrightness,
+    'RandomContrast': tf.keras.layers.RandomContrast
+}
+
 # Replace the model loading code
 def load_saved_model(model_path, custom_objects):
     """Load model with proper error handling and dtype policy initialization."""
@@ -550,40 +567,30 @@ def load_saved_model(model_path, custom_objects):
     except Exception as e:
         logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
         try:
-            # Create model architecture
+            # Create model architecture - remove softmax activation
             temp_model = FixInputSpecSequential([
                 data_augmentation,
                 layers.Input(shape=(224, 224, 3)),
                 layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
                 HFViTLogitsLayer(base_model),
                 layers.Dense(512, activation='relu'),
-                layers.Dropout(0.3),  # Reduced dropout
+                layers.Dropout(0.3),
                 layers.Dense(256, activation='relu'),
-                layers.Dropout(0.3),  # Reduced dropout
-                layers.Dense(len(id_to_index), activation='softmax')
+                layers.Dropout(0.3),
+                layers.Dense(len(id_to_index))  # Remove softmax activation
             ])
             
-            # Try to load weights directly from the saved model directory
+            # Try to load weights
             try:
                 weights_path = os.path.join(model_path, 'variables', 'variables')
                 temp_model.load_weights(weights_path)
             except:
-                # If that fails, try loading the whole directory as weights
                 temp_model.load_weights(model_path)
             
             return temp_model
         except Exception as e2:
             logging.error(f"Both loading methods failed: {str(e2)}")
             return None
-
-# Update custom objects
-custom_objects = {
-    'HFViTLogitsLayer': HFViTLogitsLayer,
-    'FixInputSpecSequential': FixInputSpecSequential,
-    'LayerNormalization': tf.keras.layers.LayerNormalization,
-    'Conv2D': tf.keras.layers.Conv2D,
-    'Dense': tf.keras.layers.Dense
-}
 
 # ...existing code...
 def find_latest_checkpoint():
@@ -959,16 +966,16 @@ best_checkpoint_callback = ModelCheckpoint(
 class MetricsCallback(tf.keras.callbacks.Callback):
     def __init__(self, val_dataset):
         super().__init__()
-        self.val_dataset = val_dataset  # Fix: use the parameter instead of self.val_dataset
+        self.val_dataset = val_dataset
 
     def on_epoch_end(self, epoch, logs=None):
         y_true_all = []
         y_pred_all = []
         for images, labels in self.val_dataset:
-            preds = self.model.predict(images)
-            # Apply softmax to the logits
-            preds = tf.nn.softmax(preds)
-            y_pred_all.extend(np.argmax(preds, axis=1))
+            logits = self.model.predict(images)
+            # Apply softmax to the logits here for predictions
+            probs = tf.nn.softmax(logits)
+            y_pred_all.extend(np.argmax(probs, axis=1))
             y_true_all.extend(labels.numpy())
         precision_val = precision_score(y_true_all, y_pred_all, average='macro')
         recall_val = recall_score(y_true_all, y_pred_all, average='macro')
