@@ -10,3 +10,4 @@ performer_recognition_model.keras
 model_checkpoints/
 /app/logs/
 logs/
+explicittagsAI.zip

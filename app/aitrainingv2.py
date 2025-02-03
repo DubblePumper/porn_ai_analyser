@@ -1,5 +1,5 @@
 import os
-# tensorboard --logdir=./logs
+# tensorboard --logdir=./logs --bind_all
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
 
@@ -66,7 +66,7 @@ performer_data_path = args.performer_data_path
 output_dataset_path = args.output_dataset_path
 model_save_path = args.model_save_path  # Add this line
 checkpoint_dir = args.checkpoint_dir
-LEARNING_RATE = 0.00005  # Further reduced
+LEARNING_RATE = 0.0005  # Further reduced
 UNFREEZE_COUNT = 10
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
