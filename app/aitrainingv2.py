@@ -3,33 +3,45 @@ import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
 
-import numpy as np
-import tensorflow as tf
+# Standaard Python modules
+import os
 import json
-from transformers import TFViTForImageClassification, ViTImageProcessor
-from tensorflow import keras
-from tensorflow.keras import layers, models
-from tensorflow.keras.preprocessing.image import load_img, img_to_array
-from tensorflow.data.experimental import cardinality
-from PIL import UnidentifiedImageError, Image
-from tensorflow.python.platform import build_info as build
 import time
-from tqdm import tqdm  # Add tqdm for progress bar
-import psutil  # Add psutil for memory monitoring
-import signal  # Add signal for timeout handling
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-# Debugging Class Weights
-from collections import Counter
-import logging  # Add logging module
-import argparse  # Add argparse for configuration
-from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping, LearningRateScheduler
-import shutil
-from tensorflow.keras import mixed_precision
-from functools import lru_cache
-import cv2
-from sklearn.metrics import precision_score, recall_score, f1_score
 import math
+import signal
+import shutil
+import logging
+import argparse
+from functools import lru_cache
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+# Externe libraries
+import numpy as np
+import cv2
+import psutil
+from tqdm import tqdm
+from PIL import Image, UnidentifiedImageError
+from sklearn.metrics import precision_score, recall_score, f1_score
+
+# TensorFlow & Keras
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, models, mixed_precision
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.callbacks import (
+    TensorBoard, ModelCheckpoint, EarlyStopping, LearningRateScheduler, ReduceLROnPlateau
+)
+from tensorflow.keras.losses import SparseCategoricalCrossentropy
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
+from tensorflow.data.experimental import cardinality
+from tensorflow.python.platform import build_info as build
+
+# TensorFlow Addons
 import tensorflow_addons as tfa
+
+# Hugging Face Transformers
+from transformers import TFViTForImageClassification, ViTImageProcessor
 
 # Global Constants
 ENABLE_IMAGE_CACHE = False  # Set to False to disable image caching
@@ -66,7 +78,7 @@ performer_data_path = args.performer_data_path
 output_dataset_path = args.output_dataset_path
 model_save_path = args.model_save_path  # Add this line
 checkpoint_dir = args.checkpoint_dir
-LEARNING_RATE = 0.0005  # Further reduced
+LEARNING_RATE = 0.0003  # Further reduced
 UNFREEZE_COUNT = 10
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
@@ -636,8 +648,8 @@ if (latest_checkpoint):
         if model is not None:
             logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
             # Compile the loaded model
-            model.compile(optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-                        loss=tfa.losses.SigmoidFocalCrossEntropy(gamma=2.0),
+            model.compile(optimizer=tfa.optimizers.AdamW(weight_decay=1e-4, learning_rate=LEARNING_RATE),
+                        loss=SparseCategoricalCrossentropy(from_logits=True),
                         metrics=['accuracy'])
             logging.info("Loaded checkpoint model compiled successfully.")
     except Exception as e:
@@ -650,8 +662,8 @@ if model is None and os.path.exists(best_model_path):
         model = load_saved_model(best_model_path, custom_objects)
         if model is not None:
             logging.info("Loaded best performing model.")
-            model.compile(optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-                        loss=tfa.losses.SigmoidFocalCrossEntropy(gamma=2.0),
+            model.compile(optimizer=tfa.optimizers.AdamW(weight_decay=1e-4, learning_rate=LEARNING_RATE),
+                        loss=SparseCategoricalCrossentropy(from_logits=True),
                         metrics=['accuracy'])
             logging.info("Loaded model compiled successfully.")
     except Exception as e:
@@ -719,9 +731,17 @@ if not os.path.exists(model_save_path):
 
 # Adjust the learning rate and compile the model
 logging.info("Compiling the model.")
+
+learning_rate_schedule = ExponentialDecay(
+    initial_learning_rate=0.0003,
+    decay_steps=10000,
+    decay_rate=0.1,
+    staircase=True
+)
+
 model.compile(
     optimizer=tf.keras.optimizers.Adam(
-        learning_rate=LEARNING_RATE,
+        learning_rate=learning_rate_schedule,
         clipnorm=1.0,  # Add gradient clipping
         epsilon=1e-7   # Increase epsilon for better numerical stability
     ),
@@ -911,11 +931,14 @@ class LoggingModelCheckpoint(ModelCheckpoint):
         super().on_epoch_end(epoch, logs)
         logging.info(f"Model checkpoint saved at epoch {epoch + 1}")
 
-# Add learning rate scheduler
-def lr_scheduler(epoch, lr):
-    if epoch > 10:
-        lr = lr * 0.1
-    return lr
+
+reduce_lr_callback = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,
+    patience=3,
+    min_lr=1e-6,
+    verbose=1
+)
 
 # Add early stopping callback definition before the callbacks list
 early_stopping_callback = EarlyStopping(
@@ -924,9 +947,6 @@ early_stopping_callback = EarlyStopping(
     verbose=1,
     restore_best_weights=True
 )
-
-# Add learning rate scheduler callback
-lr_scheduler_callback = LearningRateScheduler(lr_scheduler)
 
 class CustomTensorBoardCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
@@ -998,14 +1018,42 @@ callbacks = [
     checkpoint_callback,
     best_checkpoint_callback,
     early_stopping_callback,
-    lr_scheduler_callback,
+    reduce_lr_callback,  # Insert the ReduceLROnPlateau callback
     MetricsCallback(val_dataset),
     GradientLoggingCallback()
 ]
 logging.info("Callbacks added.")
 
+def get_last_epoch_number():
+    """Find the highest epoch number from existing checkpoints"""
+    max_epoch = -1
+    directories = [checkpoint_dir, './logs']
+    
+    for directory in directories:
+        if not os.path.exists(directory):
+            continue
+            
+        for dirname in os.listdir(directory):
+            if dirname.startswith('model_epoch_'):
+                try:
+                    epoch_num = int(dirname.split('_')[-1])
+                    max_epoch = max(max_epoch, epoch_num)
+                except ValueError:
+                    continue
+    
+    return max_epoch
 
+# Update the checkpoint callback configuration
+last_epoch = get_last_epoch_number()
+initial_epoch = last_epoch + 1 if last_epoch >= 0 else 0
 
+checkpoint_callback = LoggingModelCheckpoint(
+    filepath=os.path.join('./logs', 'model_epoch_{epoch:02d}'),
+    save_best_only=False,
+    save_freq='epoch',
+    save_format='tf',
+    verbose=1
+)
 
 # Add memory logging before and after model training
 try:
@@ -1016,7 +1064,7 @@ try:
     # Add DebugCallback to callbacks list
     debug_callback = DebugCallback()
 
-    callbacks = [progress_bar_callback, debug_callback, tensorboard_callback, checkpoint_callback, early_stopping_callback, lr_scheduler_callback]
+    callbacks = [progress_bar_callback, debug_callback, tensorboard_callback, checkpoint_callback, early_stopping_callback, reduce_lr_callback]
 
     log_memory_usage("Before training")  # Log memory usage before training
 
@@ -1030,6 +1078,7 @@ try:
                 train_dataset,
                 validation_data=val_dataset,
                 epochs=MAX_EPOCHS,
+                initial_epoch=initial_epoch,  # Add this line
                 steps_per_epoch=steps_per_epoch,
                 validation_steps=validation_steps,
                 class_weight=class_weights,
@@ -1042,6 +1091,7 @@ try:
                 train_dataset,
                 validation_data=val_dataset,
                 epochs=MAX_EPOCHS,
+                initial_epoch=initial_epoch,  # Add this line
                 steps_per_epoch=steps_per_epoch,
                 validation_steps=validation_steps,
                 class_weight=class_weights,
