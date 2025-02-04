@@ -78,11 +78,18 @@ performer_data_path = args.performer_data_path
 output_dataset_path = args.output_dataset_path
 model_save_path = args.model_save_path  # Add this line
 checkpoint_dir = args.checkpoint_dir
-LEARNING_RATE = 0.0003  # Further reduced
 UNFREEZE_COUNT = 10
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
 latest_model_path = os.path.join(checkpoint_dir, 'latest_model')
+
+# Define learning rate schedule
+learning_rate_schedule = ExponentialDecay(
+    initial_learning_rate=0.0003,
+    decay_steps=10000,
+    decay_rate=0.1,
+    staircase=True
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -647,10 +654,19 @@ if (latest_checkpoint):
         model = load_saved_model(latest_checkpoint, custom_objects)
         if model is not None:
             logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
-            # Compile the loaded model
-            model.compile(optimizer=tfa.optimizers.AdamW(weight_decay=1e-4, learning_rate=LEARNING_RATE),
-                        loss=SparseCategoricalCrossentropy(from_logits=True),
-                        metrics=['accuracy'])
+            # Compile the loaded model with learning_rate_schedule
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(
+                    learning_rate=learning_rate_schedule,
+                    clipnorm=1.0,
+                    epsilon=1e-7
+                ),
+                loss=tf.keras.losses.SparseCategoricalCrossentropy(
+                    from_logits=True,
+                    reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+                ),
+                metrics=['accuracy']
+            )
             logging.info("Loaded checkpoint model compiled successfully.")
     except Exception as e:
         logging.warning(f"Failed to load checkpoint model: {e}")
@@ -662,9 +678,18 @@ if model is None and os.path.exists(best_model_path):
         model = load_saved_model(best_model_path, custom_objects)
         if model is not None:
             logging.info("Loaded best performing model.")
-            model.compile(optimizer=tfa.optimizers.AdamW(weight_decay=1e-4, learning_rate=LEARNING_RATE),
-                        loss=SparseCategoricalCrossentropy(from_logits=True),
-                        metrics=['accuracy'])
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(
+                    learning_rate=learning_rate_schedule,
+                    clipnorm=1.0,
+                    epsilon=1e-7
+                ),
+                loss=tf.keras.losses.SparseCategoricalCrossentropy(
+                    from_logits=True,
+                    reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+                ),
+                metrics=['accuracy']
+            )
             logging.info("Loaded model compiled successfully.")
     except Exception as e:
         logging.warning(f"Failed to load best model: {e}")
@@ -691,7 +716,7 @@ if model is None:
     # Compile with sparse categorical crossentropy and label smoothing
     model.compile(
         optimizer=tf.keras.optimizers.Adam(
-            learning_rate=LEARNING_RATE,
+            learning_rate=learning_rate_schedule,  # Use same schedule here
             clipnorm=1.0
         ),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(
@@ -706,7 +731,7 @@ if model is None:
 else:
     model.compile(
         optimizer=tf.keras.optimizers.Adam(
-            learning_rate=LEARNING_RATE,
+            learning_rate=learning_rate_schedule,  # Use schedule here
             clipnorm=1.0,
             epsilon=1e-7
         ),
@@ -731,13 +756,6 @@ if not os.path.exists(model_save_path):
 
 # Adjust the learning rate and compile the model
 logging.info("Compiling the model.")
-
-learning_rate_schedule = ExponentialDecay(
-    initial_learning_rate=0.0003,
-    decay_steps=10000,
-    decay_rate=0.1,
-    staircase=True
-)
 
 model.compile(
     optimizer=tf.keras.optimizers.Adam(
