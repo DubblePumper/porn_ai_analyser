@@ -222,7 +222,7 @@ def log_memory_usage(message=""):
 # Add memory logging before and after loading images
 cached_images_bar = tqdm(desc="Images cached", unit="image")
 
-def safe_load_img_with_timeout(path, target_size, timeout=2):  # Reduced timeout to 2 seconds
+def safe_load_img_with_timeout(path, target_size, timeout=5):  # Increased timeout
     def load_image():
         try:
             # Try using cv2 first (faster)
@@ -233,40 +233,45 @@ def safe_load_img_with_timeout(path, target_size, timeout=2):  # Reduced timeout
                 img_array = img.astype(np.float32) / 255.0
                 return img_array
             
-            # Fallback to PIL if cv2 fails
-            img = Image.open(path)
-            img = img.resize((target_size[1], target_size[0]))
-            img_array = img_to_array(img) / 255.0
-            return img_array
+            # If cv2 fails, try PIL
+            with Image.open(path) as img:
+                img = img.resize((target_size[1], target_size[0]))
+                img_array = img_to_array(img) / 255.0
+                return img_array
             
         except Exception as e:
             logging.warning(f"Error loading image {path}: {str(e)}")
-            return np.zeros((target_size[0], target_size[1], 3))
+            return None
 
-    # Only use cache if enabled
-    if ENABLE_IMAGE_CACHE:
-        cache_str = cache_key(path)
-        if hasattr(safe_load_img_with_timeout, 'cache') and cache_str in safe_load_img_with_timeout.cache:
-            return safe_load_img_with_timeout.cache[cache_str]
+    # Create a simple in-memory cache
+    if not hasattr(safe_load_img_with_timeout, '_cache'):
+        safe_load_img_with_timeout._cache = {}
+        safe_load_img_with_timeout._cache_size = 1000  # Limit cache size
+
+    # Try to get from cache first
+    if path in safe_load_img_with_timeout._cache:
+        return safe_load_img_with_timeout._cache[path]
 
     try:
-        # Reduce max_workers
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(load_image)
             result = future.result(timeout=timeout)
             
-            # Only cache if enabled
-            if ENABLE_IMAGE_CACHE:
-                if not hasattr(safe_load_img_with_timeout, 'cache'):
-                    safe_load_img_with_timeout.cache = {}
-                if cache_str not in safe_load_img_with_timeout.cache:
-                    safe_load_img_with_timeout.cache[cache_str] = result
-                    cached_images_bar.update(1)
+            # Cache the result if it's valid
+            if result is not None:
+                if len(safe_load_img_with_timeout._cache) >= safe_load_img_with_timeout._cache_size:
+                    # Remove oldest item if cache is full
+                    safe_load_img_with_timeout._cache.pop(next(iter(safe_load_img_with_timeout._cache)))
+                safe_load_img_with_timeout._cache[path] = result
+                return result
             
-            return result
-    except TimeoutError:
-        logging.warning(f"Timeout loading image: {path}")
-        return np.zeros((target_size[0], target_size[1], 3))
+    except (TimeoutError, Exception) as e:
+        logging.warning(f"Timeout or error loading image: {path}")
+    
+    # Return blank image if all attempts fail
+    blank = np.zeros((target_size[0], target_size[1], 3), dtype=np.float32)
+    safe_load_img_with_timeout._cache[path] = blank  # Cache the blank image to avoid retrying
+    return blank
 
 
 # Update the safe_load_img function to use the new timeout mechanism
