@@ -36,6 +36,7 @@ from tensorflow.keras.losses import SparseCategoricalCrossentropy
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
 from tensorflow.data.experimental import cardinality
 from tensorflow.python.platform import build_info as build
+from tensorflow.keras.optimizers.schedules import PiecewiseConstantDecay
 
 # TensorFlow Addons
 import tensorflow_addons as tfa
@@ -83,13 +84,37 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
 latest_model_path = os.path.join(checkpoint_dir, 'latest_model')
 
-# Define learning rate schedule
-learning_rate_schedule = ExponentialDecay(
-    initial_learning_rate=0.0003,
-    decay_steps=10000,
-    decay_rate=0.1,
-    staircase=True
-)
+# Define learning rate schedule parameters
+def create_learning_rate_schedule():
+    initial_lr = 0.001
+    decay_steps = 50000
+    decay_rate = 0.1
+    return tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=initial_lr,
+        decay_steps=decay_steps,
+        decay_rate=decay_rate,
+        staircase=True
+    )
+
+def get_optimizer():
+    """Create and return a new optimizer instance"""
+    return tf.keras.optimizers.Adam(
+        learning_rate=create_learning_rate_schedule(),
+        clipnorm=1.0,
+        epsilon=1e-7
+    )
+
+def compile_model(model):
+    """Compile model with consistent settings"""
+    model.compile(
+        optimizer=get_optimizer(),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True,
+            reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+        ),
+        metrics=['accuracy']
+    )
+    return model
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -502,18 +527,45 @@ logging.info(f"Final layer status: {frozen_count - unfrozen_count} frozen, {unfr
 logging.info(f"Layer freezing complete")
 logging.info(f"=====================================================================")
 
-# Add RandomBrightness and RandomContrast to the data augmentation
-logging.info("Setting up data augmentation.")
-data_augmentation = keras.Sequential(
-    [
-        layers.RandomFlip("horizontal_and_vertical"),
-        layers.RandomRotation(0.2),
-        layers.RandomZoom(0.2),
-        layers.RandomBrightness(factor=0.2),
-        layers.RandomContrast(factor=0.2),
-    ]
-)
-logging.info("Data augmentation setup complete.")
+# Define initial data augmentation (empty)
+initial_data_augmentation = keras.Sequential([
+    layers.Rescaling(1./255)  # At least one layer is required
+])
+
+# Define full data augmentation
+full_data_augmentation = keras.Sequential([
+    layers.Rescaling(1./255),
+    layers.RandomFlip("horizontal_and_vertical"),
+    layers.RandomRotation(0.2),
+    layers.RandomZoom(0.2),
+    layers.RandomBrightness(factor=0.2),
+    layers.RandomContrast(factor=0.2),
+])
+
+# Set initial data augmentation
+data_augmentation = initial_data_augmentation
+
+# Modify create_model_architecture to use the current data_augmentation
+def create_model_architecture():
+    """Create a consistent model architecture with proper layer sizes"""
+    num_classes = len(id_to_index)
+    
+    return FixInputSpecSequential([
+        layers.Input(shape=(224, 224, 3)),
+        layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
+        HFViTLogitsLayer(base_model),
+        layers.BatchNormalization(),
+        # First dense block
+        layers.Dense(768, activation='relu'),  # Match ViT hidden size
+        layers.BatchNormalization(),
+        layers.Dropout(0.3),
+        # Second dense block
+        layers.Dense(512, activation='relu'),
+        layers.BatchNormalization(),
+        layers.Dropout(0.3),
+        # Output layer
+        layers.Dense(num_classes)  # Final layer matches number of classes
+    ])
 
 class HFViTLogitsLayer(tf.keras.layers.Layer):
     def __init__(self, base_model):
@@ -574,32 +626,62 @@ custom_objects = {
     'RandomContrast': tf.keras.layers.RandomContrast
 }
 
-# Replace the model loading code
-def load_saved_model(model_path, custom_objects):
-    """Load model with proper error handling and dtype policy initialization."""
+def inspect_saved_model(model_path):
+    """Inspect saved model architecture to determine layer sizes"""
     try:
-        # First try loading normally
-        model = tf.keras.models.load_model(model_path, 
-                                       custom_objects=custom_objects, 
-                                       compile=False)
-        return model
+        reader = tf.train.load_checkpoint(os.path.join(model_path, 'variables', 'variables'))
+        shape_map = reader.get_variable_to_shape_map()
+        # Try to get dense layer sizes
+        for var_name, shape in shape_map.items():
+            if 'dense' in var_name.lower() and 'kernel' in var_name.lower():
+                logging.info(f"Found dense layer: {var_name} with shape {shape}")
+        return shape_map
     except Exception as e:
-        logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
-        try:
-            # Create model architecture - remove softmax activation
-            temp_model = FixInputSpecSequential([
+        logging.warning(f"Failed to inspect saved model: {e}")
+        return None
+
+def create_model_architecture():
+    """Create a consistent model architecture with proper layer sizes"""
+    num_classes = len(id_to_index)
+    
+    # Try to inspect existing model first
+    latest_checkpoint = find_latest_checkpoint()
+    if latest_checkpoint:
+        shape_map = inspect_saved_model(latest_checkpoint)
+        if shape_map:
+            # Use the same architecture as saved model
+            return FixInputSpecSequential([
                 data_augmentation,
                 layers.Input(shape=(224, 224, 3)),
                 layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
                 HFViTLogitsLayer(base_model),
-                layers.Dense(512, activation='relu'),
+                layers.BatchNormalization(),
+                layers.Dense(512, activation='relu'),  # Match saved model size
+                layers.BatchNormalization(),
                 layers.Dropout(0.3),
                 layers.Dense(256, activation='relu'),
+                layers.BatchNormalization(),
                 layers.Dropout(0.3),
-                layers.Dense(len(id_to_index))  # Remove softmax activation
+                layers.Dense(num_classes)
             ])
+    
+    # Default architecture if no saved model found
+    return FixInputSpecSequential([
+        # ...same architecture as before...
+    ])
+
+def load_saved_model(model_path, custom_objects):
+    """Load model with proper error handling and dtype policy initialization."""
+    try:
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects, compile=False)
+        return model
+    except Exception as e:
+        logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
+        try:
+            temp_model = create_model_architecture()
+            temp_model.build((None, 224, 224, 3))
             
-            # Try to load weights
+            # Try loading weights
             try:
                 weights_path = os.path.join(model_path, 'variables', 'variables')
                 temp_model.load_weights(weights_path)
@@ -611,7 +693,6 @@ def load_saved_model(model_path, custom_objects):
             logging.error(f"Both loading methods failed: {str(e2)}")
             return None
 
-# ...existing code...
 def find_latest_checkpoint():
     
     """Find the latest checkpoint in the checkpoint directory or logs directory."""
@@ -655,18 +736,7 @@ if (latest_checkpoint):
         if model is not None:
             logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
             # Compile the loaded model with learning_rate_schedule
-            model.compile(
-                optimizer=tf.keras.optimizers.Adam(
-                    learning_rate=learning_rate_schedule,
-                    clipnorm=1.0,
-                    epsilon=1e-7
-                ),
-                loss=tf.keras.losses.SparseCategoricalCrossentropy(
-                    from_logits=True,
-                    reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
-                ),
-                metrics=['accuracy']
-            )
+            model = compile_model(model)
             logging.info("Loaded checkpoint model compiled successfully.")
     except Exception as e:
         logging.warning(f"Failed to load checkpoint model: {e}")
@@ -678,18 +748,7 @@ if model is None and os.path.exists(best_model_path):
         model = load_saved_model(best_model_path, custom_objects)
         if model is not None:
             logging.info("Loaded best performing model.")
-            model.compile(
-                optimizer=tf.keras.optimizers.Adam(
-                    learning_rate=learning_rate_schedule,
-                    clipnorm=1.0,
-                    epsilon=1e-7
-                ),
-                loss=tf.keras.losses.SparseCategoricalCrossentropy(
-                    from_logits=True,
-                    reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
-                ),
-                metrics=['accuracy']
-            )
+            model = compile_model(model)
             logging.info("Loaded model compiled successfully.")
     except Exception as e:
         logging.warning(f"Failed to load best model: {e}")
@@ -698,56 +757,16 @@ if model is None and os.path.exists(best_model_path):
 # Only create a new model if no existing model could be loaded
 if model is None:
     logging.info("No existing model found. Creating new model.")
-    model = FixInputSpecSequential([
-        data_augmentation,
-        layers.Input(shape=(224, 224, 3)),
-        layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
-        HFViTLogitsLayer(base_model),
-        layers.BatchNormalization(),  # Add BatchNorm
-        layers.Dense(512, activation='relu'),
-        layers.BatchNormalization(),  # Add BatchNorm
-        layers.Dropout(0.1),
-        layers.Dense(256, activation='relu'),
-        layers.BatchNormalization(),  # Add BatchNorm
-        layers.Dropout(0.1),
-        layers.Dense(len(id_to_index))  # Remove softmax activation here
-    ])
-    
-    # Compile with sparse categorical crossentropy and label smoothing
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(
-            learning_rate=learning_rate_schedule,  # Use same schedule here
-            clipnorm=1.0
-        ),
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True,  # Keep this as True since we're using raw logits
-            reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
-        ),
-        metrics=['accuracy']
-    )
+    model = create_model_architecture()
+    model.build((None, 224, 224, 3))
+    model = compile_model(model)
     logging.info("New model created and compiled successfully.")
-
-# Update the model compilation after loading
 else:
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(
-            learning_rate=learning_rate_schedule,  # Use schedule here
-            clipnorm=1.0,
-            epsilon=1e-7
-        ),
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True,  # Keep this as True
-            reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
-        ),
-        metrics=['accuracy']
-    )
+    logging.info("Using loaded model, skipping build step.")
+    # Just recompile the loaded model
+    model = compile_model(model)
 
 logging.info(f"=====================================================================")
-
-# Build the model with an input shape (only needed for new models)
-if not model.built:
-    model.build((None, 224, 224, 3))
-    logging.info("Model built with input shape.")
 
 # Save the initial model if it's new
 if not os.path.exists(model_save_path):
@@ -757,18 +776,7 @@ if not os.path.exists(model_save_path):
 # Adjust the learning rate and compile the model
 logging.info("Compiling the model.")
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=learning_rate_schedule,
-        clipnorm=1.0,  # Add gradient clipping
-        epsilon=1e-7   # Increase epsilon for better numerical stability
-    ),
-    loss=tf.keras.losses.SparseCategoricalCrossentropy(
-        from_logits=True,  # Change to True since we're using raw logits
-        reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
-    ),
-    metrics=['accuracy']
-)
+model = compile_model(model)
 logging.info("Model compilation complete.")
 
 # Count label occurrences
@@ -1028,6 +1036,47 @@ class GradientLoggingCallback(tf.keras.callbacks.Callback):
             grad_norms = [tf.norm(grad).numpy() for grad in grads]
             logging.info(f"Batch {batch} - Gradient norms: {grad_norms}")
 
+# Add a callback to switch to full data augmentation
+class StagedAugmentationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, accuracy_threshold=0.02):
+        super().__init__()
+        self.accuracy_threshold = accuracy_threshold
+        self.augmentation_enabled = False
+
+    def on_epoch_end(self, epoch, logs=None):
+        global data_augmentation
+        current_accuracy = logs.get('accuracy', 0.0)
+        
+        if not self.augmentation_enabled and current_accuracy <= self.accuracy_threshold:
+            logging.info(f"Accuracy ({current_accuracy:.4f}) below threshold ({self.accuracy_threshold:.4f}). Enabling data augmentation.")
+            data_augmentation = full_data_augmentation
+            self.augmentation_enabled = True
+            
+            # Create new model with same architecture
+            new_model = create_model_architecture()
+            
+            # Get the current weights before recompiling
+            old_weights = self.model.get_weights()
+            
+            # Compile new model with fresh optimizer
+            new_model.compile(
+                optimizer=get_optimizer(),
+                loss=tf.keras.losses.SparseCategoricalCrossentropy(
+                    from_logits=True,
+                    reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE
+                ),
+                metrics=['accuracy']
+            )
+            
+            # Set the weights after compiling
+            new_model.set_weights(old_weights)
+            self.model = new_model
+            
+            logging.info("Model rebuilt with data augmentation enabled.")
+
+# Update callbacks list to use modified StagedAugmentationCallback
+staged_augmentation_callback = StagedAugmentationCallback(accuracy_threshold=0.02)  # 2% threshold
+
 callbacks = [
     progress_bar_callback,
     debug_callback,
@@ -1038,8 +1087,10 @@ callbacks = [
     early_stopping_callback,
     reduce_lr_callback,  # Insert the ReduceLROnPlateau callback
     MetricsCallback(val_dataset),
-    GradientLoggingCallback()
+    GradientLoggingCallback(),
+    staged_augmentation_callback
 ]
+
 logging.info("Callbacks added.")
 
 def get_last_epoch_number():
@@ -1064,6 +1115,8 @@ def get_last_epoch_number():
 # Update the checkpoint callback configuration
 last_epoch = get_last_epoch_number()
 initial_epoch = last_epoch + 1 if last_epoch >= 0 else 0
+if initial_epoch > 0:
+    initial_epoch -= 1
 
 checkpoint_callback = LoggingModelCheckpoint(
     filepath=os.path.join('./logs', 'model_epoch_{epoch:02d}'),
@@ -1133,7 +1186,7 @@ with open('label_to_index.json', 'w') as f:
 logging.info("label_to_index mapping saved successfully.")
 
 # Ensure the input shape is known during evaluation
-if val_size > 0:
+if val_size > 0 and validation_steps > 0:
     try:
         logging.info("Evaluating the model with a progress bar.")
         # Remove the old evaluation code:
@@ -1183,6 +1236,116 @@ if history is not None and 'accuracy' in history.history and 'val_accuracy' in h
     logging.info(f"Accuracy difference (train - val): {diff:.4f}")
     if diff > 0.1:
         logging.info("Potential overfitting detected. Consider regularization or early stopping.")
+
+def create_model_architecture():
+    """Create a consistent model architecture with proper layer sizes"""
+    num_classes = len(id_to_index)
+    
+    return FixInputSpecSequential([
+        data_augmentation,
+        layers.Input(shape=(224, 224, 3)),
+        layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
+        HFViTLogitsLayer(base_model),
+        layers.BatchNormalization(),
+        # First dense block
+        layers.Dense(768, activation='relu'),  # Match ViT hidden size
+        layers.BatchNormalization(),
+        layers.Dropout(0.3),
+        # Second dense block
+        layers.Dense(512, activation='relu'),
+        layers.BatchNormalization(),
+        layers.Dropout(0.3),
+        # Output layer
+        layers.Dense(num_classes)  # Final layer matches number of classes
+    ])
+
+def load_saved_model(model_path, custom_objects):
+    """Load model with proper error handling and dtype policy initialization."""
+    try:
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects, compile=False)
+        return model
+    except Exception as e:
+        logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
+        try:
+            temp_model = create_model_architecture()
+            temp_model.build((None, 224, 224, 3))
+            
+            # Try loading weights
+            try:
+                weights_path = os.path.join(model_path, 'variables', 'variables')
+                temp_model.load_weights(weights_path)
+            except:
+                temp_model.load_weights(model_path)
+            
+            return temp_model
+        except Exception as e2:
+            logging.error(f"Both loading methods failed: {str(e2)}")
+            return None
+
+
+# Update model creation to use the same architecture
+if model is None:
+    logging.info("No existing model found. Creating new model.")
+    model = create_model_architecture()
+    model.build((None, 224, 224, 3))
+    model = compile_model(model)
+    logging.info("New model created and compiled successfully.")
+
+# Ensure class weights are correctly formatted
+class_weights = {int(k): float(v) for k, v in class_weights.items()}
+
+# Add detailed logging to debug class weights
+for label, weight in class_weights.items():
+    if not isinstance(label, int) or not isinstance(weight, (int, float)):
+        logging.error(f"Invalid class weight: label={label}, weight={weight}")
+        raise ValueError(
+            "Class weights are not correctly formatted. Ensure all labels are integers and weights are numeric.")
+
+# Pass class_weight to model.fit
+history = model.fit(
+    train_dataset,
+    validation_data=val_dataset,
+    epochs=MAX_EPOCHS,
+    initial_epoch=initial_epoch,  # Add this line
+    steps_per_epoch=steps_per_epoch,
+    validation_steps=validation_steps,
+    class_weight=class_weights,
+    callbacks=callbacks
+)
+
+# Ensure the input shape is known during evaluation
+if val_size > 0 and validation_steps > 0:
+    try:
+        logging.info("Evaluating the model with a progress bar.")
+        # Remove the old evaluation code:
+        # for image, label in val_dataset.take(1):
+        #     image.set_shape([None, 224, 224, 3])
+        #     label.set_shape([None])
+        # evaluation = model.evaluate(val_dataset)
+        # logging.info(f"Validation loss: {evaluation[0]:.4f}, Validation accuracy: {evaluation[1]:.4f}")
+
+        # Use a manual evaluation loop with TQDM instead:
+        total_loss = 0.0
+        total_acc = 0.0
+        steps = 0
+        with tqdm(total=len(val_dataset), desc="Evaluating", unit="batch") as pbar:
+            for images, labels in val_dataset:
+                result = model.test_on_batch(images, labels, reset_metrics=False)
+                total_loss += result[0]
+                total_acc += result[1]
+                steps += 1
+                pbar.update(1)
+
+        avg_loss = total_loss / steps
+        avg_acc = total_acc / steps
+        logging.info(f"Validation loss: {avg_loss:.4f}, Validation accuracy: {avg_acc:.4f}")
+
+    except Exception as e:
+        logging.error(f"Error during model evaluation: {e}")
+else:
+    logging.warning("Validation dataset is empty. Skipping evaluation.")
+
+
 
 
 
