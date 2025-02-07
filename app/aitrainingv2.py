@@ -80,16 +80,25 @@ output_dataset_path = args.output_dataset_path
 model_save_path = args.model_save_path  # Add this line
 checkpoint_dir = args.checkpoint_dir
 UNFREEZE_COUNT = 10
+WHEN_INCLUDE_DATA_AUGMENTATION = 75 # Include data augmentation after this epoch as procentage for example 2%
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
 latest_model_path = os.path.join(checkpoint_dir, 'latest_model')
 
-# Define learning rate schedule parameters
+# Add the custom learning rate schedule subclass to support multiplication
+class MyExponentialDecay(tf.keras.optimizers.schedules.ExponentialDecay):
+    def __mul__(self, other):
+        # Return the initial learning rate multiplied by other.
+        # This simple implementation is sufficient for the logging/scaling use-case.
+        return self.initial_learning_rate * other
+
+# Update the learning rate schedule function to use the custom subclass
 def create_learning_rate_schedule():
     initial_lr = 0.001
     decay_steps = 50000
     decay_rate = 0.1
-    return tf.keras.optimizers.schedules.ExponentialDecay(
+    # Use MyExponentialDecay instead of the standard ExponentialDecay
+    return MyExponentialDecay(
         initial_learning_rate=initial_lr,
         decay_steps=decay_steps,
         decay_rate=decay_rate,
@@ -222,7 +231,7 @@ def log_memory_usage(message=""):
 # Add memory logging before and after loading images
 cached_images_bar = tqdm(desc="Images cached", unit="image")
 
-def safe_load_img_with_timeout(path, target_size, timeout=5):  # Increased timeout
+def safe_load_img_with_timeout(path, target_size, timeout=15):  # Increased default timeout from 5 to 15 seconds
     def load_image():
         try:
             # Try using cv2 first (faster)
@@ -1043,7 +1052,7 @@ class GradientLoggingCallback(tf.keras.callbacks.Callback):
 
 # Add a callback to switch to full data augmentation
 class StagedAugmentationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, accuracy_threshold=0.02):
+    def __init__(self, accuracy_threshold=WHEN_INCLUDE_DATA_AUGMENTATION * 0.01):
         super().__init__()
         self.accuracy_threshold = accuracy_threshold
         self.augmentation_enabled = False
