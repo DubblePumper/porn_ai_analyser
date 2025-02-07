@@ -94,8 +94,8 @@ class MyExponentialDecay(tf.keras.optimizers.schedules.ExponentialDecay):
 
 # Update the learning rate schedule function to use the custom subclass
 def create_learning_rate_schedule():
-    initial_lr = 0.001
-    decay_steps = 50000
+    initial_lr = 0.003
+    decay_steps = 75000
     decay_rate = 0.1
     # Use MyExponentialDecay instead of the standard ExponentialDecay
     return MyExponentialDecay(
