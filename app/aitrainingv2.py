@@ -1,5 +1,10 @@
 import os
+import sys
+# Append the repository root to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import config  # Import global configuration
 # tensorboard --logdir=./logs --bind_all
+# streamlit run dashboard/dashboard.py
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
 
@@ -15,6 +20,9 @@ import argparse
 from functools import lru_cache
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+import matplotlib.pyplot as plt
+import io
 
 # Externe libraries
 import numpy as np
@@ -60,27 +68,16 @@ def cache_key(path):
 # Suppress specific TensorFlow warnings
 tf.get_logger().setLevel('ERROR')
 
-# Parse command-line arguments
-parser = argparse.ArgumentParser(description='Train an AI model to recognize a person inside an image.')
-parser.add_argument('--batch_size', type=int, default=16, help='Further reduce batch size to help avoid OOM')  # Reduced batch size
-parser.add_argument('--max_epochs', type=int, default=50, help='Increase epoch count to 50')
-parser.add_argument('--dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images", help='Path to the dataset')
-parser.add_argument('--performer_data_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json", help='Path to the performer data JSON file')
-parser.add_argument('--output_dataset_path', type=str, default=r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy", help='Path to save the output dataset with metadata')
-parser.add_argument('--model_save_path', type=str, default="performer_recognition_model", help='Path to save the trained model')
-parser.add_argument('--checkpoint_dir', type=str, default='model_checkpoints', help='Directory to save model checkpoints')
-args = parser.parse_args()
-
-# Use parsed arguments
-BATCH_SIZE = args.batch_size
-MAX_EPOCHS = args.max_epochs
-dataset_path = args.dataset_path
-performer_data_path = args.performer_data_path
-output_dataset_path = args.output_dataset_path
-model_save_path = args.model_save_path  # Add this line
-checkpoint_dir = args.checkpoint_dir
-UNFREEZE_COUNT = 10
-WHEN_INCLUDE_DATA_AUGMENTATION = 75 # Include data augmentation after this epoch as procentage for example 2%
+# Use global variables from config.py instead of command-line args:
+BATCH_SIZE = config.BATCH_SIZE
+MAX_EPOCHS = config.MAX_EPOCHS
+dataset_path = config.DATASET_PATH
+performer_data_path = config.PERFORMER_DATA_PATH
+output_dataset_path = config.OUTPUT_DATASET_PATH
+model_save_path = config.MODEL_SAVE_PATH
+checkpoint_dir = config.CHECKPOINT_DIR
+UNFREEZE_COUNT = config.UNFREEZE_COUNT
+WHEN_INCLUDE_DATA_AUGMENTATION = config.DATA_AUGMENTATION_EPOCH_THRESHOLD
 os.makedirs(checkpoint_dir, exist_ok=True)
 best_model_path = os.path.join(checkpoint_dir, 'best_model')
 latest_model_path = os.path.join(checkpoint_dir, 'latest_model')
@@ -92,18 +89,41 @@ class MyExponentialDecay(tf.keras.optimizers.schedules.ExponentialDecay):
         # This simple implementation is sufficient for the logging/scaling use-case.
         return self.initial_learning_rate * other
 
-# Update the learning rate schedule function to use the custom subclass
-def create_learning_rate_schedule():
-    initial_lr = 0.003
-    decay_steps = 75000
-    decay_rate = 0.1
-    # Use MyExponentialDecay instead of the standard ExponentialDecay
-    return MyExponentialDecay(
-        initial_learning_rate=initial_lr,
-        decay_steps=decay_steps,
-        decay_rate=decay_rate,
-        staircase=True
-    )
+# Replace the create_learning_rate_schedule function with a custom schedule
+
+class WarmUpExponentialDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, initial_lr, warmup_steps, decay_steps, decay_rate):
+        super().__init__()
+        self.initial_lr = initial_lr
+        self.warmup_steps = warmup_steps
+        self.decay_steps = decay_steps
+        self.decay_rate = decay_rate
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        return tf.cond(
+            step < self.warmup_steps,
+            lambda: self.initial_lr * (step / self.warmup_steps),
+            lambda: self.initial_lr * (self.decay_rate ** ((step - self.warmup_steps) / self.decay_steps))
+        )
+
+    def get_config(self):
+        return {
+            "initial_lr": self.initial_lr,
+            "warmup_steps": self.warmup_steps,
+            "decay_steps": self.decay_steps,
+            "decay_rate": self.decay_rate
+        }
+    
+    # Add multiplication operator support for scaling the schedule
+    def __mul__(self, other):
+        return WarmUpExponentialDecay(self.initial_lr * other, self.warmup_steps, self.decay_steps, self.decay_rate)
+
+def create_learning_rate_schedule(warmup_steps=config.WARMUP_STEPS):
+    initial_lr = config.INITIAL_LR
+    decay_steps = config.DECAY_STEPS
+    decay_rate = config.DECAY_RATE
+    return WarmUpExponentialDecay(initial_lr, warmup_steps, decay_steps, decay_rate)
 
 def get_optimizer():
     """Create and return a new optimizer instance"""
@@ -232,51 +252,25 @@ def log_memory_usage(message=""):
 cached_images_bar = tqdm(desc="Images cached", unit="image")
 
 def safe_load_img_with_timeout(path, target_size, timeout=15):  # Increased default timeout from 5 to 15 seconds
-    def load_image():
-        try:
-            # Try using cv2 first (faster)
-            img = cv2.imread(path)
-            if img is not None:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                img = cv2.resize(img, (target_size[1], target_size[0]))
-                img_array = img.astype(np.float32) / 255.0
-                return img_array
-            
-            # If cv2 fails, try PIL
-            with Image.open(path) as img:
-                img = img.resize((target_size[1], target_size[0]))
-                img_array = img_to_array(img) / 255.0
-                return img_array
-            
-        except Exception as e:
-            logging.warning(f"Error loading image {path}: {str(e)}")
-            return None
-
-    # Create a simple in-memory cache
+    max_retries = 3  # New: Retry up to 3 times before giving up
     if not hasattr(safe_load_img_with_timeout, '_cache'):
         safe_load_img_with_timeout._cache = {}
-        safe_load_img_with_timeout._cache_size = 1000  # Limit cache size
-
     # Try to get from cache first
     if path in safe_load_img_with_timeout._cache:
         return safe_load_img_with_timeout._cache[path]
-
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(load_image)
-            result = future.result(timeout=timeout)
-            
-            # Cache the result if it's valid
-            if result is not None:
-                if len(safe_load_img_with_timeout._cache) >= safe_load_img_with_timeout._cache_size:
-                    # Remove oldest item if cache is full
-                    safe_load_img_with_timeout._cache.pop(next(iter(safe_load_img_with_timeout._cache)))
-                safe_load_img_with_timeout._cache[path] = result
-                return result
-            
-    except (TimeoutError, Exception) as e:
-        logging.warning(f"Timeout or error loading image: {path}")
     
+    for attempt in range(1, max_retries + 1):
+        try:
+            # ...existing code to load image...
+            # For example purposes, call the original load function:
+            image = load_img(path, target_size=target_size)  # Placeholder for actual image loading
+            image = img_to_array(image)
+            if image is not None and np.all(image.shape == (target_size[0], target_size[1], 3)):
+                safe_load_img_with_timeout._cache[path] = image
+                return image
+        except (TimeoutError, Exception) as e:
+            logging.warning(f"Attempt {attempt} failed for image: {path} with error: {e}")
+            # Optionally add a short delay between retries here
     # Return blank image if all attempts fail
     blank = np.zeros((target_size[0], target_size[1], 3), dtype=np.float32)
     safe_load_img_with_timeout._cache[path] = blank  # Cache the blank image to avoid retrying
@@ -449,33 +443,19 @@ def map_fn_with_counter(image_paths, labels):
 # Apply batching early
 def create_batched_dataset(image_paths, labels, batch_size):
     logging.info(f"Creating batched dataset. Dataset size: {len(image_paths)}, Batch size: {batch_size}")
-
-    # Create a TensorFlow Dataset
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
+    # Use global variable for shuffle buffer size
+    dataset = dataset.shuffle(buffer_size=config.SHUFFLE_BUFFER_SIZE)
     
-    # Add shuffling before mapping
-    dataset = dataset.shuffle(buffer_size=5000)
-    
-    # Add caching after shuffling
-    dataset = dataset.cache()
-
-    # Map over dataset
     dataset = dataset.map(
         lambda x, y: tf.py_function(func=load_image_and_label, inp=[x, y], Tout=(tf.float32, tf.int32)),
-        num_parallel_calls=tf.data.AUTOTUNE
+        num_parallel_calls=config.NUM_PARALLEL_CALLS
     )
-
-    # Assert shapes of tensors
     dataset = dataset.map(
-        lambda x, y: (
-            tf.ensure_shape(x, [224, 224, 3]),  # Ensure image shape
-            tf.ensure_shape(y, [])              # Ensure label shape
-        )
+        lambda x, y: (tf.ensure_shape(x, [224, 224, 3]), tf.ensure_shape(y, []))
     )
-
-    # Batch dataset, ensuring no double batching
-    dataset = dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
-    
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = dataset.prefetch(config.PREFETCH_BUFFER_SIZE)
     return dataset
 
 
@@ -565,37 +545,36 @@ def create_model_architecture():
     num_classes = len(id_to_index)
     
     return FixInputSpecSequential([
+        data_augmentation,
         layers.Input(shape=(224, 224, 3)),
         layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
         HFViTLogitsLayer(base_model),
         layers.BatchNormalization(),
         # First dense block
         layers.Dense(768, activation='relu'),  # Match ViT hidden size
-        layers.BatchNormalization(),
+        layers.BatchNormalization(), # Batch Normalization after Dense
         layers.Dropout(0.3),
         # Second dense block
         layers.Dense(512, activation='relu'),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(), # Batch Normalization after Dense
         layers.Dropout(0.3),
         # Output layer
         layers.Dense(num_classes)  # Final layer matches number of classes
     ])
 
 class HFViTLogitsLayer(tf.keras.layers.Layer):
-    def __init__(self, base_model):
-        super(HFViTLogitsLayer, self).__init__(name='HFViTLogitsLayer')
-        self.base_model = base_model  # No need for self.input_spec here
+    def __init__(self, base_model, **kwargs):
+        super().__init__(**kwargs)
+        self.base_model = base_model
 
     def call(self, inputs):
-        return self.base_model({"pixel_values": inputs}).logits
+        outputs = self.base_model(inputs).logits
+        return outputs
 
     def get_config(self):
         config = super().get_config()
-        return config  # Ensure no `input_spec` is saved in config
-
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
+        config.update({'base_model': None})
+        return config
 
 class FixInputSpecSequential(tf.keras.Sequential):
     """Custom Sequential model that handles input_spec properly."""
@@ -743,18 +722,21 @@ logging.info("Loading saved model and stripping input_spec.")
 model = None
 
 # Try loading the latest checkpoint first
-latest_checkpoint = find_latest_checkpoint()
-if (latest_checkpoint):
+latest_checkpoint = find_latest_checkpoint()  # scan once
+if latest_checkpoint:
     try:
-        model = load_saved_model(latest_checkpoint, custom_objects)
-        if model is not None:
-            logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
-            # Compile the loaded model with learning_rate_schedule
-            model = compile_model(model)
-            logging.info("Loaded checkpoint model compiled successfully.")
+        # Attempt standard loading using the latest checkpoint
+        logging.info(f"Trying to load model from checkpoint: {latest_checkpoint}")
+        model = tf.keras.models.load_model(latest_checkpoint, custom_objects=custom_objects)
+        logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
     except Exception as e:
-        logging.warning(f"Failed to load checkpoint model: {e}")
-        model = None
+        logging.warning("Standard loading failed, trying alternative method: " + str(e))
+        try:
+            # Alternative loading attempt using the same latest_checkpoint
+            model = load_saved_model(latest_checkpoint, custom_objects)  # define alternative_load_model accordingly
+            logging.info(f"Loaded alternative checkpoint model from: {latest_checkpoint}")
+        except Exception as e_alt:
+            logging.error("Alternative loading also failed: " + str(e_alt))
 
 # If no checkpoint model was loaded, try the best model
 if model is None and os.path.exists(best_model_path):
@@ -772,7 +754,8 @@ if model is None and os.path.exists(best_model_path):
 if model is None:
     logging.info("No existing model found. Creating new model.")
     model = create_model_architecture()
-    model.build((None, 224, 224, 3))
+    dummy_input = tf.zeros((1, 224, 224, 3), dtype=tf.float32)
+    model(dummy_input)
     model = compile_model(model)
     logging.info("New model created and compiled successfully.")
 else:
@@ -1263,11 +1246,11 @@ def create_model_architecture():
         layers.BatchNormalization(),
         # First dense block
         layers.Dense(768, activation='relu'),  # Match ViT hidden size
-        layers.BatchNormalization(),
+        layers.BatchNormalization(), # Batch Normalization after Dense
         layers.Dropout(0.3),
         # Second dense block
         layers.Dense(512, activation='relu'),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(), # Batch Normalization after Dense
         layers.Dropout(0.3),
         # Output layer
         layers.Dense(num_classes)  # Final layer matches number of classes
@@ -1331,12 +1314,6 @@ history = model.fit(
 if val_size > 0 and validation_steps > 0:
     try:
         logging.info("Evaluating the model with a progress bar.")
-        # Remove the old evaluation code:
-        # for image, label in val_dataset.take(1):
-        #     image.set_shape([None, 224, 224, 3])
-        #     label.set_shape([None])
-        # evaluation = model.evaluate(val_dataset)
-        # logging.info(f"Validation loss: {evaluation[0]:.4f}, Validation accuracy: {evaluation[1]:.4f}")
 
         # Use a manual evaluation loop with TQDM instead:
         total_loss = 0.0
@@ -1358,6 +1335,149 @@ if val_size > 0 and validation_steps > 0:
         logging.error(f"Error during model evaluation: {e}")
 else:
     logging.warning("Validation dataset is empty. Skipping evaluation.")
+
+# Add cache for processed images
+@lru_cache(maxsize=100000)
+def cache_key(path):
+    """Generate a unique cache key for an image path based on path and modification time."""
+    try:
+        mtime = os.path.getmtime(path)
+        return f"{path}_{mtime}"
+    except OSError:
+        return path  # Fallback to just the path if can't get mtime
+
+if history is not None and 'accuracy' in history.history and 'val_accuracy' in history.history:
+    final_train_acc = history.history['accuracy'][-1]
+    final_val_acc = history.history['val_accuracy'][-1]
+    diff = final_train_acc - final_val_acc
+    logging.info(f"Final training accuracy: {final_train_acc:.4f}")
+    logging.info(f"Final validation accuracy: {final_val_acc:.4f}")
+    logging.info(f"Accuracy difference (train - val): {diff:.4f}")
+    if diff > 0.1:
+        logging.info("Potential overfitting detected. Consider regularization or early stopping.")
+
+def create_model_architecture():
+    """Create a consistent model architecture with proper layer sizes"""
+    num_classes = len(id_to_index)
+    
+    return FixInputSpecSequential([
+        data_augmentation,
+        layers.Input(shape=(224, 224, 3)),
+        layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
+        HFViTLogitsLayer(base_model),
+        layers.BatchNormalization(),
+        # First dense block
+        layers.Dense(768, activation='relu'),  # Match ViT hidden size
+        layers.BatchNormalization(), # Batch Normalization after Dense
+        layers.Dropout(0.3),
+        # Second dense block
+        layers.Dense(512, activation='relu'),
+        layers.BatchNormalization(), # Batch Normalization after Dense
+        layers.Dropout(0.3),
+        # Output layer
+        layers.Dense(num_classes)  # Final layer matches number of classes
+    ])
+
+def load_saved_model(model_path, custom_objects):
+    """Load model with proper error handling and dtype policy initialization."""
+    try:
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects, compile=False)
+        return model
+    except Exception as e:
+        logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
+        try:
+            temp_model = create_model_architecture()
+            temp_model.build((None, 224, 224, 3))
+            
+            # Try loading weights
+            try:
+                weights_path = os.path.join(model_path, 'variables', 'variables')
+                temp_model.load_weights(weights_path)
+            except:
+                temp_model.load_weights(model_path)
+            
+            return temp_model
+        except Exception as e2:
+            logging.error(f"Both loading methods failed: {str(e2)}")
+            return None
+
+
+# Voeg onderstaande functies en callback toe
+
+def compute_gradcam(model, img_tensor, class_index, conv_layer_name):
+    # Bepaal de output van de gekozen convolutielaag
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [model.get_layer(conv_layer_name).output, model.output]
+    )
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(img_tensor)
+        loss = predictions[:, class_index]
+
+    grads = tape.gradient(loss, conv_outputs)
+    weights = tf.reduce_mean(grads, axis=(1, 2))
+    cam = tf.reduce_sum(tf.multiply(weights[:, tf.newaxis, tf.newaxis, :], conv_outputs), axis=-1)
+    cam = tf.maximum(cam, 0)
+    heatmap = cam[0].numpy()
+    # Normaliseer de heatmap
+    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+    return heatmap
+
+class LiveVisualizationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, log_dir, sample_images, sample_labels, conv_layer_name, interval=1):
+        super().__init__()
+        self.log_dir = log_dir
+        self.sample_images = sample_images  # Numpy array met enkele sample inputbeelden
+        self.sample_labels = sample_labels  # Ground truth labels corresponderend aan sample_images
+        self.conv_layer_name = conv_layer_name
+        self.interval = interval
+        self.file_writer = tf.summary.create_file_writer(self.log_dir)
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Neem een batch sample en haal de voorspelling op
+        img_batch = tf.convert_to_tensor(self.sample_images, dtype=tf.float32)
+        preds = self.model(img_batch, training=False)
+        pred_probs = tf.nn.softmax(preds, axis=-1).numpy()
+        pred_labels = pred_probs.argmax(axis=-1)
+        
+        # Creëer een visuele compositie per sample
+        viz_images = []
+        for i, img in enumerate(self.sample_images):
+            # Bereken Grad-CAM heatmap voor de voorspelde klasse
+            heatmap = compute_gradcam(self.model, tf.expand_dims(img, axis=0), pred_labels[i], self.conv_layer_name)
+            # Overlay de heatmap op het origineel
+            plt.figure(figsize=(4,4))
+            plt.imshow(img.astype("uint8"))
+            plt.imshow(heatmap, cmap='jet', alpha=0.5)
+            plt.title(f"Pred: {pred_labels[i]} ({pred_probs[i][pred_labels[i]]*100:.1f}%)\nGT: {self.sample_labels[i]}")
+            buf = io.BytesIO()
+            plt.axis('off')
+            plt.savefig(buf, format='png', bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            viz_img = tf.image.decode_png(buf.getvalue(), channels=4)
+            viz_img = tf.expand_dims(viz_img, 0)
+            viz_images.append(viz_img)
+        if viz_images:
+            concat_img = tf.concat(viz_images, axis=0)
+            with self.file_writer.as_default():
+                tf.summary.image("Live Visualisatie", concat_img, step=epoch, max_outputs=len(viz_images))
+
+# Configure GPU memory growth
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except Exception as e:
+        print("Error setting memory growth:", e)
+
+# Enable mixed precision training for RTX 3060ti
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_global_policy(policy)
+
+# Enable XLA for improved performance
+tf.config.optimizer.set_jit(True)
 
 
 
