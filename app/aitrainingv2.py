@@ -125,12 +125,12 @@ def create_learning_rate_schedule(warmup_steps=config.WARMUP_STEPS):
     decay_rate = config.DECAY_RATE
     return WarmUpExponentialDecay(initial_lr, warmup_steps, decay_steps, decay_rate)
 
+# 4) Use AdamW instead of Adam, remove clipnorm
 def get_optimizer():
-    """Create and return a new optimizer instance"""
-    return tf.keras.optimizers.Adam(
+    """Create and return a new optimizer instance using TensorFlow Addons' AdamW."""
+    return tfa.optimizers.AdamW(
         learning_rate=create_learning_rate_schedule(),
-        clipnorm=1.0,
-        epsilon=1e-7
+        weight_decay=1e-5
     )
 
 def compile_model(model):
@@ -456,9 +456,6 @@ def create_batched_dataset(image_paths, labels, batch_size):
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
     return dataset
 
-# Reduce batch size to lower RAM usage
-BATCH_SIZE = 16  # Adjust as needed
-
 # Create a batched tf.data.Dataset from the image paths and labels
 logging.info("Creating batched dataset.")
 dataset = create_batched_dataset(image_paths, labels, BATCH_SIZE)
@@ -540,15 +537,17 @@ full_data_augmentation = keras.Sequential([
 data_augmentation = initial_data_augmentation
 
 # Modify create_model_architecture to use the current data_augmentation
+# 5) Add a global average pooling layer before Dense
 def create_model_architecture():
     """Create a consistent model architecture with proper layer sizes"""
     num_classes = len(id_to_index)
-    
+    base_model.gradient_checkpointing_enable()  # 6) Gradient checkpointing
     return FixInputSpecSequential([
         data_augmentation,
         layers.Input(shape=(224, 224, 3)),
         layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
         HFViTLogitsLayer(base_model),
+        layers.GlobalAveragePooling2D(),  # reduce memory usage
         layers.BatchNormalization(),
         # First dense block
         layers.Dense(512, activation='relu'),  # Reduced size
@@ -721,13 +720,11 @@ logging.info(f"=================================================================
 logging.info("Loading saved model and stripping input_spec.")
 model = None
 
-# Try loading the latest checkpoint first
-latest_checkpoint = find_latest_checkpoint()  # scan once
+latest_checkpoint = find_latest_checkpoint()  # Scan once
 if latest_checkpoint:
     try:
-        # Attempt standard loading using the latest checkpoint
         logging.info(f"Trying to load model from checkpoint: {latest_checkpoint}")
-        model = tf.keras.models.load_model(latest_checkpoint, custom_objects=custom_objects)
+        model = load_saved_model(latest_checkpoint, custom_objects)
         logging.info(f"Loaded model from checkpoint: {latest_checkpoint}")
     except Exception as e:
         logging.warning("Standard loading failed, trying alternative method: " + str(e))
@@ -1282,128 +1279,6 @@ def load_saved_model(model_path, custom_objects):
             return None
 
 
-# Update model creation to use the same architecture
-if model is None:
-    logging.info("No existing model found. Creating new model.")
-    model = create_model_architecture()
-    model.build((None, 224, 224, 3))
-    model = compile_model(model)
-    logging.info("New model created and compiled successfully.")
-
-# Ensure class weights are correctly formatted
-class_weights = {int(k): float(v) for k, v in class_weights.items()}
-
-# Add detailed logging to debug class weights
-for label, weight in class_weights.items():
-    if not isinstance(label, int) or not isinstance(weight, (int, float)):
-        logging.error(f"Invalid class weight: label={label}, weight={weight}")
-        raise ValueError(
-            "Class weights are not correctly formatted. Ensure all labels are integers and weights are numeric.")
-
-# Pass class_weight to model.fit
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=MAX_EPOCHS,
-    initial_epoch=initial_epoch,  # Add this line
-    steps_per_epoch=steps_per_epoch,
-    validation_steps=validation_steps,
-    class_weight=class_weights,
-    callbacks=callbacks
-)
-
-# Ensure the input shape is known during evaluation
-if val_size > 0 and validation_steps > 0:
-    try:
-        logging.info("Evaluating the model with a progress bar.")
-
-        # Use a manual evaluation loop with TQDM instead:
-        total_loss = 0.0
-        total_acc = 0.0
-        steps = 0
-        with tqdm(total=len(val_dataset), desc="Evaluating", unit="batch") as pbar:
-            for images, labels in val_dataset:
-                result = model.test_on_batch(images, labels, reset_metrics=False)
-                total_loss += result[0]
-                total_acc += result[1]
-                steps += 1
-                pbar.update(1)
-
-        avg_loss = total_loss / steps
-        avg_acc = total_acc / steps
-        logging.info(f"Validation loss: {avg_loss:.4f}, Validation accuracy: {avg_acc:.4f}")
-
-    except Exception as e:
-        logging.error(f"Error during model evaluation: {e}")
-else:
-    logging.warning("Validation dataset is empty. Skipping evaluation.")
-
-# Add cache for processed images
-@lru_cache(maxsize=100000)
-def cache_key(path):
-    """Generate a unique cache key for an image path based on path and modification time."""
-    try:
-        mtime = os.path.getmtime(path)
-        return f"{path}_{mtime}"
-    except OSError:
-        return path  # Fallback to just the path if can't get mtime
-
-if history is not None and 'accuracy' in history.history and 'val_accuracy' in history.history:
-    final_train_acc = history.history['accuracy'][-1]
-    final_val_acc = history.history['val_accuracy'][-1]
-    diff = final_train_acc - final_val_acc
-    logging.info(f"Final training accuracy: {final_train_acc:.4f}")
-    logging.info(f"Final validation accuracy: {final_val_acc:.4f}")
-    logging.info(f"Accuracy difference (train - val): {diff:.4f}")
-    if diff > 0.1:
-        logging.info("Potential overfitting detected. Consider regularization or early stopping.")
-
-def create_model_architecture():
-    """Create a consistent model architecture with proper layer sizes"""
-    num_classes = len(id_to_index)
-    
-    return FixInputSpecSequential([
-        data_augmentation,
-        layers.Input(shape=(224, 224, 3)),
-        layers.Lambda(lambda x: tf.transpose(x, perm=[0, 3, 1, 2])),
-        HFViTLogitsLayer(base_model),
-        layers.BatchNormalization(),
-        # First dense block
-        layers.Dense(768, activation='relu'),  # Match ViT hidden size
-        layers.BatchNormalization(), # Batch Normalization after Dense
-        layers.Dropout(0.3),
-        # Second dense block
-        layers.Dense(512, activation='relu'),
-        layers.BatchNormalization(), # Batch Normalization after Dense
-        layers.Dropout(0.3),
-        # Output layer
-        layers.Dense(num_classes)  # Final layer matches number of classes
-    ])
-
-def load_saved_model(model_path, custom_objects):
-    """Load model with proper error handling and dtype policy initialization."""
-    try:
-        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects, compile=False)
-        return model
-    except Exception as e:
-        logging.warning(f"Standard loading failed, trying alternative method: {str(e)}")
-        try:
-            temp_model = create_model_architecture()
-            temp_model.build((None, 224, 224, 3))
-            
-            # Try loading weights
-            try:
-                weights_path = os.path.join(model_path, 'variables', 'variables')
-                temp_model.load_weights(weights_path)
-            except:
-                temp_model.load_weights(model_path)
-            
-            return temp_model
-        except Exception as e2:
-            logging.error(f"Both loading methods failed: {str(e2)}")
-            return None
-
-
 # Voeg onderstaande functies en callback toe
 
 def compute_gradcam(model, img_tensor, class_index, conv_layer_name):
@@ -1481,7 +1356,35 @@ mixed_precision.set_global_policy(policy)
 # Enable XLA for improved performance
 tf.config.optimizer.set_jit(True)
 
+# 1) Switch to image_dataset_from_directory
+def create_image_datasets(train_dir, val_split=0.2):
+    train_dataset = tf.keras.preprocessing.image_dataset_from_directory(
+        train_dir,
+        validation_split=val_split,
+        subset='training',
+        seed=42,
+        image_size=(224, 224),
+        batch_size=config.BATCH_SIZE,
+        label_mode='int'
+    )
+    val_dataset = tf.keras.preprocessing.image_dataset_from_directory(
+        train_dir,
+        validation_split=val_split,
+        subset='validation',
+        seed=42,
+        image_size=(224, 224),
+        batch_size=config.BATCH_SIZE,
+        label_mode='int'
+    )
+    # 2) Conditional caching
+    # Use .cache('dataset.tf-data') if RAM is limited
+    train_dataset = train_dataset.cache()
+    val_dataset = val_dataset.cache()
+    # 3) Prefetch
+    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+    val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
+    return train_dataset, val_dataset
 
-
-
+# Replace manual dataset creation with image_dataset_from_directory
+train_dataset, val_dataset = create_image_datasets(dataset_path, val_split=0.2)
 

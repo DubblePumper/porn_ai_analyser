@@ -1,6 +1,6 @@
 # Global configuration variables
 
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 MAX_EPOCHS = 50
 DATASET_PATH = r"E:\github repos\porn_ai_analyser\app\datasets\pornstar_images"
 PERFORMER_DATA_PATH = r"E:\github repos\porn_ai_analyser\app\datasets\performers_details_data.json"
