@@ -444,9 +444,7 @@ def map_fn_with_counter(image_paths, labels):
 def create_batched_dataset(image_paths, labels, batch_size):
     logging.info(f"Creating batched dataset. Dataset size: {len(image_paths)}, Batch size: {batch_size}")
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
-    # Use global variable for shuffle buffer size
     dataset = dataset.shuffle(buffer_size=config.SHUFFLE_BUFFER_SIZE)
-    
     dataset = dataset.map(
         lambda x, y: tf.py_function(func=load_image_and_label, inp=[x, y], Tout=(tf.float32, tf.int32)),
         num_parallel_calls=config.NUM_PARALLEL_CALLS
@@ -455,9 +453,11 @@ def create_batched_dataset(image_paths, labels, batch_size):
         lambda x, y: (tf.ensure_shape(x, [224, 224, 3]), tf.ensure_shape(y, []))
     )
     dataset = dataset.batch(batch_size, drop_remainder=True)
-    dataset = dataset.prefetch(config.PREFETCH_BUFFER_SIZE)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
     return dataset
 
+# Reduce batch size to lower RAM usage
+BATCH_SIZE = 16  # Adjust as needed
 
 # Create a batched tf.data.Dataset from the image paths and labels
 logging.info("Creating batched dataset.")
@@ -551,11 +551,11 @@ def create_model_architecture():
         HFViTLogitsLayer(base_model),
         layers.BatchNormalization(),
         # First dense block
-        layers.Dense(768, activation='relu'),  # Match ViT hidden size
+        layers.Dense(512, activation='relu'),  # Reduced size
         layers.BatchNormalization(), # Batch Normalization after Dense
         layers.Dropout(0.3),
         # Second dense block
-        layers.Dense(512, activation='relu'),
+        layers.Dense(256, activation='relu'),  # Reduced size
         layers.BatchNormalization(), # Batch Normalization after Dense
         layers.Dropout(0.3),
         # Output layer
@@ -993,8 +993,9 @@ tensorboard_callback = TensorBoard(
 custom_tensorboard_callback = CustomTensorBoardCallback()
 checkpoint_callback = LoggingModelCheckpoint(
     filepath=os.path.join('./logs', 'model_epoch_{epoch:02d}'),
-    save_best_only=False,
-    save_freq='epoch',
+    save_best_only=True,  # Save only the best model
+    monitor='val_loss',
+    mode='min',
     save_format='tf',
     verbose=1  # Add verbose output
 )
@@ -1117,8 +1118,9 @@ if initial_epoch > 0:
 
 checkpoint_callback = LoggingModelCheckpoint(
     filepath=os.path.join('./logs', 'model_epoch_{epoch:02d}'),
-    save_best_only=False,
-    save_freq='epoch',
+    save_best_only=True,  # Save only the best model
+    monitor='val_loss',
+    mode='min',
     save_format='tf',
     verbose=1
 )

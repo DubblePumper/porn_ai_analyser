@@ -7,7 +7,7 @@ PERFORMER_DATA_PATH = r"E:\github repos\porn_ai_analyser\app\datasets\performers
 OUTPUT_DATASET_PATH = r"E:\github repos\porn_ai_analyser\app\datasets\performer_images_with_metadata.npy"
 MODEL_SAVE_PATH = "performer_recognition_model"
 CHECKPOINT_DIR = "model_checkpoints"
-UNFREEZE_COUNT = 10
+UNFREEZE_COUNT = 8
 DATA_AUGMENTATION_EPOCH_THRESHOLD = 75  # threshold percentage
 
 # Data pipeline settings
