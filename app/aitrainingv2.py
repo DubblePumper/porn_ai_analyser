@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 # Append the repository root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import config  # Import global configuration
@@ -931,14 +932,12 @@ class TQDMProgressBar(tf.keras.callbacks.Callback):
 
 class DebugCallback(tf.keras.callbacks.Callback):
     def on_epoch_begin(self, epoch, logs=None):
-        self.epoch_start_time = time.time()
-        log_memory_usage(f"Epoch {epoch+1} start")  # Log memory usage at the start of each epoch
+        log_memory_usage(f"Epoch {epoch} start")
+        gc.collect()
 
     def on_epoch_end(self, epoch, logs=None):
-        elapsed = time.time() - self.epoch_start_time
-        log_memory_usage(f"Epoch {epoch+1} end")  # Log memory usage at the end of each epoch
-        mem_usage = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-        logging.info(f"Epoch {epoch+1} took {elapsed:.2f}s, memory usage ~ {mem_usage:.1f} MB")
+        log_memory_usage(f"Epoch {epoch} end")
+        gc.collect()
 
 # Add LoggingModelCheckpoint class definition
 class LoggingModelCheckpoint(ModelCheckpoint):
@@ -1376,10 +1375,9 @@ def create_image_datasets(train_dir, val_split=0.2):
         batch_size=config.BATCH_SIZE,
         label_mode='int'
     )
-    # 2) Conditional caching
-    # Use .cache('dataset.tf-data') if RAM is limited
-    train_dataset = train_dataset.cache()
-    val_dataset = val_dataset.cache()
+    # Instead of caching everything in RAM, store on disk
+    train_dataset = train_dataset.cache('train_dataset_cache.tf-data')
+    val_dataset = val_dataset.cache('val_dataset_cache.tf-data')
     # 3) Prefetch
     train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
     val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
